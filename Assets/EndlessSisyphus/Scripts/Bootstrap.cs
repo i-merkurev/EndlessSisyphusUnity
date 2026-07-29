@@ -24,8 +24,11 @@ namespace EndlessSisyphus
 
             var go = new GameObject("EndlessSisyphus");
             var game = go.AddComponent<SisyphusGame>();   // Awake создаёт WorldRenderer/AudioEngine и настраивает камеру
+            var quotes = go.AddComponent<QuoteDirector>();
+            quotes.game = game;
             var ui = go.AddComponent<GameUI>();
             ui.game = game;
+            ui.quotes = quotes;
         }
     }
 }

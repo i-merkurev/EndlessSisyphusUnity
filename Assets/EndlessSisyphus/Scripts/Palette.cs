@@ -20,10 +20,10 @@ namespace EndlessSisyphus
         public static readonly Color32 Lava = C(255, 120, 40);
         public static readonly Color32 Smoke = C(90, 84, 96);
 
-        public static readonly Color32 Dirt1 = C(138, 96, 54);
-        public static readonly Color32 Dirt2 = C(104, 72, 40);
-        public static readonly Color32 Dirt3 = C(80, 54, 30);
-        public static readonly Color32 Rock = C(96, 90, 82);
+        public static readonly Color32 Dirt1 = C(112, 82, 74);
+        public static readonly Color32 Dirt2 = C(82, 61, 62);
+        public static readonly Color32 Dirt3 = C(61, 45, 52);
+        public static readonly Color32 Rock = C(92, 88, 90);
         public static readonly Color32 Grass = C(96, 140, 60);
 
         public static readonly Color32 Ice1 = C(196, 232, 244);
@@ -43,12 +43,12 @@ namespace EndlessSisyphus
 
         public static readonly Color32 Sun = C(255, 214, 96);
         public static readonly Color32 Moon = C(222, 224, 240);
-        public static readonly Color32 Wood = C(126, 86, 46);
-        public static readonly Color32 WoodDk = C(86, 58, 30);
+        public static readonly Color32 Wood = C(105, 73, 62);
+        public static readonly Color32 WoodDk = C(70, 50, 48);
         public static readonly Color32 Chasm = C(10, 8, 16);
 
-        public static readonly Color32 DeadTree = C(70, 56, 44);
-        public static readonly Color32 Shrub = C(88, 74, 46);
+        public static readonly Color32 DeadTree = C(66, 53, 52);
+        public static readonly Color32 Shrub = C(78, 68, 52);
         public static readonly Color32 Goat = C(86, 74, 66);
         public static readonly Color32 GoatDk = C(54, 46, 40);
         public static readonly Color32 Horn = C(188, 176, 150);
