@@ -222,7 +222,8 @@ namespace EndlessSisyphus
         // ================= Экраны =================
         public void StartGame()
         {
-            audioEngine.StartMusic(); audioEngine.RestoreGameplayMusic(); audioEngine.WindStop();
+            audioEngine.StartMusic(); audioEngine.RestoreGameplayMusic();
+            audioEngine.WindStop(); audioEngine.RainStop();
             RunId++;
             State = GState.Playing;
             Height = 0; Momentum = 0; Stamina = GameConfig.StaminaMax;
@@ -255,7 +256,7 @@ namespace EndlessSisyphus
             Critters.RemoveAll(c => c.kind == CritterKind.Snake);
         }
 
-        public void GoMenu() { State = GState.Start; DefeatStage = DefeatPhase.None; audioEngine.RestoreGameplayMusic(); audioEngine.WindStop(); }
+        public void GoMenu() { State = GState.Start; DefeatStage = DefeatPhase.None; audioEngine.RestoreGameplayMusic(); audioEngine.WindStop(); audioEngine.RainStop(); }
         public void OpenSettings() { State = GState.Settings; }
         public void CloseSettings() { State = GState.Start; }
 
@@ -341,7 +342,12 @@ namespace EndlessSisyphus
                         }
                     }
                 }
-                else if (Phase == ObPhase.Warn) { Phase = ObPhase.Active; ObTimer = ObstacleDuration(); }
+                else if (Phase == ObPhase.Warn)
+                {
+                    Phase = ObPhase.Active;
+                    ObTimer = ObstacleDuration();
+                    if (Obstacle == ObKind.Rain) audioEngine.RainStart(RainVariant);
+                }
                 else
                 {
                     if (Obstacle == ObKind.Wind)
@@ -350,7 +356,11 @@ namespace EndlessSisyphus
                         WindReactionTimer = 0f;
                         WindExitGrace = GameConfig.WindExitGrace;
                     }
-                    if (Obstacle == ObKind.Rain) RainExitGrace = GameConfig.RainExitGrace;
+                    if (Obstacle == ObKind.Rain)
+                    {
+                        audioEngine.RainStop();
+                        RainExitGrace = GameConfig.RainExitGrace;
+                    }
                     Obstacle = ObKind.None; Phase = ObPhase.Calm;
                     ObTimer = Rand(GameConfig.CalmMin, GameConfig.CalmMax) / Mathf.Sqrt(Difficulty()) / Set.FreqMul;
                 }
@@ -520,7 +530,10 @@ namespace EndlessSisyphus
             if (Height < 0) { Height = 0; if (Momentum < 0) Momentum = 0; }
 
             float drain = 0;
-            bool rainGrace = (Obstacle == ObKind.Rain && Phase == ObPhase.Warn) || RainExitGrace > 0f;
+            // Нажать C можно сразу после появления предупреждения. Вся фаза
+            // выбранного дождя считается корректной, включая короткое нарастание
+            // визуальной интенсивности в начале активной фазы.
+            bool rainGrace = Obstacle == ObKind.Rain || RainExitGrace > 0f;
             bool wrongSteepHold = !IsOnSteep && SpaceDown && ShiftDown;
             bool recentWrongSteepUse = !IsOnSteep &&
                 (wrongSteepHold ||
@@ -549,7 +562,7 @@ namespace EndlessSisyphus
             SfxTimer -= dt;
             if (SfxTimer <= 0f)
             {
-                if (IsOnIce && SpaceDown && Mathf.Abs(Momentum) > 0.15f) { audioEngine.Ice(); SfxTimer = Rand(0.34f, 0.48f); }
+                if (IsOnIce && Mathf.Abs(Momentum) > 0.15f) { audioEngine.Ice(); SfxTimer = Rand(0.34f, 0.48f); }
                 else if (IsOnSteep && SpaceDown) { audioEngine.Friction(); SfxTimer = Rand(0.16f, 0.24f); }
                 else SfxTimer = 0.1f;
             }
@@ -580,6 +593,7 @@ namespace EndlessSisyphus
             Shake = 0.65f;
             StoneSpinVel = -1.2f;
             audioEngine.WindStop();
+            audioEngine.RainStop();
             audioEngine.BeginDefeat(reason);
         }
 

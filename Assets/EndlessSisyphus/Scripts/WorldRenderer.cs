@@ -21,6 +21,7 @@ namespace EndlessSisyphus
         bool spriteReady;
         bool skyParallaxReady;
         float skyParallaxScroll;
+        float steepActorBlend;
 
         const float WorldBreathAmount = 0.01f;
         const float WorldBreathPeriod = 10f;
@@ -46,6 +47,7 @@ namespace EndlessSisyphus
         // силуэт валуна (порт BOULDER)
         const int BoulderRadius = 19;
         const float BoulderOffset = 25f;
+        const float SteepBoulderOffset = 18f;
         const float HeroScale = 1.18f;
         readonly Vector2[] boulder = new Vector2[20];
 
@@ -93,6 +95,8 @@ namespace EndlessSisyphus
         // ============================================================ РЕНДЕР
         public void Render()
         {
+            steepActorBlend = Mathf.MoveTowards(steepActorBlend, g.IsOnSteep ? 1f : 0f,
+                Mathf.Min(Time.unscaledDeltaTime, 0.05f) * 3.5f);
             float night = Nightness();
             UpdateSkyParallax();
             DrawSky(night); DrawCelestial(night); DrawStars(night); DrawClouds();
@@ -160,7 +164,12 @@ namespace EndlessSisyphus
         void ActorLayout(out float stoneX, out float heroX, out float tumble, out bool showStone)
         {
             float px = VW * 0.40f;
-            stoneX = px + BoulderOffset;
+            // На крутом участке одинаковый экранный отступ превращался в
+            // чрезмерную дистанцию вдоль поверхности. Плавно подтягиваем камень
+            // к вытянутым рукам Сизифа только на таком участке.
+            float stoneOffset = Mathf.Lerp(BoulderOffset, SteepBoulderOffset,
+                Mathf.SmoothStep(0f, 1f, steepActorBlend));
+            stoneX = px + stoneOffset;
             heroX = px;
             tumble = 0f;
             showStone = true;
@@ -223,7 +232,10 @@ namespace EndlessSisyphus
         {
             ActorLayout(out float sx, out float hpx, out float tumble, out bool showStone);
             int R = BoulderRadius;
-            float sy = SlopeY(sx) + BoulderOffset * Mathf.Sin(SlopeRotation(sx)) - R + 2;
+            // SlopeY(sx) already contains the complete rise of the terrain at the
+            // boulder's position. Adding the slope angle again made the boulder
+            // float away from Sisyphus on steep patches.
+            float sy = SlopeY(sx) - R + 2;
             bouSR.transform.position = ToWorld(sx, sy);
             bouSR.transform.rotation = Quaternion.Euler(0, 0, -g.StoneAngle * Mathf.Rad2Deg);
             bouSR.enabled = showStone;
@@ -531,7 +543,7 @@ namespace EndlessSisyphus
             int R = BoulderRadius;
             if (showStone)
             {
-                float sy = SlopeY(sx) + BoulderOffset * Mathf.Sin(SlopeRotation(sx)) - R + 2;
+                float sy = SlopeY(sx) - R + 2;
                 bg.FillEllipse(sx, SlopeY(sx) + 1, R, 4, new Color32(0, 0, 0, 255), 0.38f);
                 DrawBoulder(sx, sy, R, g.StoneAngle);
             }
