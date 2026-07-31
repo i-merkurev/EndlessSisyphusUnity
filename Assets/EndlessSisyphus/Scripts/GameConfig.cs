@@ -27,6 +27,10 @@ namespace EndlessSisyphus
         public const float DrainWind = 18f;
         public const float DrainIce = 18f;
         public const float DrainSteep = 22f;
+        public const float DrainWrongSteepCombo = 14f;
+        public const float ErrWrongSteepComboTap = 4f;
+        public const float WrongSteepComboGrace = 1.5f;
+        public const float WrongSteepComboWindow = 0.7f;
         public const float DrainRollback = 8f;
         public const float ErrWindTap = 4f;
         public const float DrainCareful = 12f;     // осторожный режим вне дождя — ошибка

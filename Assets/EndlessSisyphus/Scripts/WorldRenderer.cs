@@ -19,6 +19,11 @@ namespace EndlessSisyphus
         Transform root;
         SpriteRenderer bgSR, sisSR, bouSR;
         bool spriteReady;
+        bool skyParallaxReady;
+        float skyParallaxScroll;
+
+        const float WorldBreathAmount = 0.01f;
+        const float WorldBreathPeriod = 10f;
 
         /// <summary>true — герои рисуются в процедурном слое (по умолчанию, гарантированно верно).
         /// false — рисуй их своими спрайтами через sisSR/bouSR.</summary>
@@ -89,6 +94,7 @@ namespace EndlessSisyphus
         public void Render()
         {
             float night = Nightness();
+            UpdateSkyParallax();
             DrawSky(night); DrawCelestial(night); DrawStars(night); DrawClouds();
             DrawFarRanges(); DrawVolcano();
             DrawMountainCritters(); DrawEagles();
@@ -106,14 +112,47 @@ namespace EndlessSisyphus
                 spriteReady = true;
             }
 
-            // тряска — сдвиг всего мира
+            // Едва заметное «дыхание» мира вокруг горизонта. Минимальный масштаб
+            // остаётся равным 1, чтобы при выдохе по краям кадра не появлялся фон камеры.
+            float breathPhase = Time.unscaledTime * (Mathf.PI * 2f / WorldBreathPeriod) - Mathf.PI * 0.5f;
+            float breath01 = (Mathf.Sin(breathPhase) + 1f) * 0.5f;
+            float breathScale = 1f + WorldBreathAmount * breath01;
+            root.localScale = new Vector3(breathScale, breathScale, 1f);
+
+            Vector3 breathPivot = new Vector3(VW * 0.5f, VH * 0.60f, 0f);
+            Vector3 breathOffset = breathPivot * (1f - breathScale);
+
+            // тряска — дополнительный сдвиг всего мира
             float sh = g.Shake > 0 ? g.Shake * 3f : 0f;
-            root.position = sh > 0 ? new Vector3(Mathf.Round(Random.Range(-sh, sh)), Mathf.Round(Random.Range(-sh, sh)), 0) : Vector3.zero;
+            Vector3 shakeOffset = sh > 0
+                ? new Vector3(Mathf.Round(Random.Range(-sh, sh)), Mathf.Round(Random.Range(-sh, sh)), 0f)
+                : Vector3.zero;
+            root.position = breathOffset + shakeOffset;
 
             UpdateHeroTransforms();
         }
 
         float Nightness() => (1 - Mathf.Cos((g.Clock / GameConfig.DayLen) * Mathf.PI * 2f)) / 2f;
+
+        void UpdateSkyParallax()
+        {
+            if (!skyParallaxReady || g.Scroll + VW < skyParallaxScroll)
+            {
+                skyParallaxScroll = g.Scroll;
+                skyParallaxReady = true;
+                return;
+            }
+
+            float dt = Mathf.Min(Time.unscaledDeltaTime, 0.05f);
+            float follow = 1f - Mathf.Exp(-dt * 3.2f);
+            skyParallaxScroll = Mathf.Lerp(skyParallaxScroll, g.Scroll, follow);
+        }
+
+        static int PositiveMod(int value, int modulus)
+        {
+            int result = value % modulus;
+            return result < 0 ? result + modulus : result;
+        }
 
         // canvas-точка (y-вниз) → миров. координата (y-вверх) для спрайт-объектов
         Vector3 ToWorld(float cx, float cyDown) => new Vector3(cx, VH - cyDown, 0);
@@ -217,9 +256,11 @@ namespace EndlessSisyphus
         {
             if (night < 0.15f) return;
             float alpha = Mathf.Clamp01((night - 0.15f) * 1.3f);
+            int starOffset = Mathf.RoundToInt(skyParallaxScroll * 0.018f);
             for (int i = 0; i < 55; i++)
             {
-                int x = (int)((i * 71.3f) % VW), y = (int)((i * 47.9f) % (VH * 0.55f));
+                int x = PositiveMod((int)((i * 71.3f) % VW) - starOffset, VW);
+                int y = (int)((i * 47.9f) % (VH * 0.55f));
                 if ((i * 13 + Mathf.FloorToInt(g.Clock * 2)) % 19 != 0) bg.PlotBlend(x, y, new Color32(255, 255, 255, 255), alpha);
             }
         }
@@ -227,9 +268,15 @@ namespace EndlessSisyphus
         void DrawClouds()
         {
             var c = new Color32(230, 230, 245, 255);
+            int cloudOffset = Mathf.RoundToInt(skyParallaxScroll * 0.18f);
+            int wrapWidth = Mathf.RoundToInt(VW * 1.4f);
+            int wrapMargin = Mathf.RoundToInt(VW * 0.2f);
             foreach (var cl in g.Clouds)
             {
-                float cx = Mathf.Floor(cl.x * VW), cy = Mathf.Floor(cl.y * VH), r = 6 * cl.s;
+                int nativeX = Mathf.FloorToInt(cl.x * VW);
+                float cx = PositiveMod(nativeX - cloudOffset + wrapMargin, wrapWidth) - wrapMargin;
+                float cy = Mathf.Floor(cl.y * VH);
+                float r = 6 * cl.s;
                 bg.FillCircle(cx, cy, r, c, 0.16f); bg.FillCircle(cx + r, cy + 2, r * 0.8f, c, 0.16f); bg.FillCircle(cx - r, cy + 2, r * 0.7f, c, 0.16f);
             }
         }
@@ -238,17 +285,18 @@ namespace EndlessSisyphus
         {
             (Color32 col, float h, float amp, float w, float sp)[] layers =
             {
-                (Palette.MountFar, 0.40f, 0.10f, 90f, 0.10f),
-                (Palette.MountMid, 0.48f, 0.13f, 70f, 0.16f),
+                (Palette.MountFar, 0.40f, 0.10f, 90f, 0.06f),
+                (Palette.MountMid, 0.48f, 0.13f, 70f, 0.13f),
             };
+            float heightShift = Mathf.Round(Mathf.Clamp(g.Height * 0.018f, 0f, 8f));
             foreach (var L in layers)
             {
-                float off = (g.Scroll * L.sp) % L.w;
+                float off = Mathf.Round((skyParallaxScroll * L.sp) % L.w);
                 var pts = new List<Vector2> { new Vector2(0, VH) };
                 for (float x = -L.w; x <= VW + L.w; x += L.w)
                 {
-                    pts.Add(new Vector2(x - off + L.w / 2, VH * (L.h - L.amp)));
-                    pts.Add(new Vector2(x - off + L.w, VH * (L.h + L.amp * 0.4f)));
+                    pts.Add(new Vector2(x - off + L.w / 2, Mathf.Round(VH * (L.h - L.amp) + heightShift)));
+                    pts.Add(new Vector2(x - off + L.w, Mathf.Round(VH * (L.h + L.amp * 0.4f) + heightShift)));
                 }
                 pts.Add(new Vector2(VW, VH));
                 bg.FillPolygon(pts.ToArray(), L.col);
@@ -508,21 +556,21 @@ namespace EndlessSisyphus
             var lo = T(R * 0.34f, R * 0.38f);
             bg.FillEllipse(lo.x, lo.y, R * 0.32f, R * 0.18f, Palette.StoneLo, 0.48f);
 
-            // Две асимметричные трещины занимают разные зоны камня и не
-            // пересекаются: никаких геометрических «крестов» и «плюсов».
+            // Две неровные трещины начинаются у противоположных краёв и
+            // остаются смещёнными от центра, чтобы не складываться в лицо.
             var crackA = new[]
             {
-                T(-R * 0.44f, -R * 0.24f),
-                T(-R * 0.27f, -R * 0.17f),
-                T(-R * 0.16f, -R * 0.02f),
-                T(-R * 0.03f, R * 0.05f)
+                T(-R * 0.64f, -R * 0.38f),
+                T(-R * 0.47f, -R * 0.25f),
+                T(-R * 0.55f, -R * 0.08f),
+                T(-R * 0.38f, R * 0.03f)
             };
             var crackB = new[]
             {
-                T(R * 0.39f, -R * 0.11f),
-                T(R * 0.24f, R * 0.01f),
-                T(R * 0.27f, R * 0.18f),
-                T(R * 0.11f, R * 0.31f)
+                T(R * 0.61f, R * 0.43f),
+                T(R * 0.43f, R * 0.26f),
+                T(R * 0.24f, R * 0.35f),
+                T(R * 0.13f, R * 0.18f)
             };
             bg.StrokePolyline(crackA, Palette.StoneCr, 1);
             bg.StrokePolyline(crackB, Palette.StoneCr, 1);
