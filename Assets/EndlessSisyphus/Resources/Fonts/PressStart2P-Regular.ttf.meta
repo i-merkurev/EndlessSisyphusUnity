@@ -1,5 +1,5 @@
 fileFormatVersion: 2
-guid: 529105838b83e4b468821fdc45b20e6a
+guid: 99e3edf55d4da45c4809a35248473687
 TrueTypeFontImporter:
   externalObjects: {}
   serializedVersion: 4
@@ -9,10 +9,10 @@ TrueTypeFontImporter:
   characterPadding: 1
   includeFontData: 1
   fontNames:
-  - Cormorant SC
+  - Press Start 2P
   fallbackFontReferences: []
   customCharacters: 
-  fontRenderingMode: 0
+  fontRenderingMode: 2
   ascentCalculationMode: 1
   useLegacyBoundsCalculation: 0
   shouldRoundAdvanceValue: 1

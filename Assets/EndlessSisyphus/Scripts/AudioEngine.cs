@@ -127,7 +127,7 @@ namespace EndlessSisyphus
             if (muted) return;
             if (windClip == null) windClip = BuildWind();
             wind.clip = windClip;
-            wind.volume = Gain(0.24f, NatureSfxGain);
+            wind.volume = Gain(0.34f, NatureSfxGain);
             if (!wind.isPlaying) wind.Play();
         }
         public void WindStop() { wind.Stop(); wind.volume = 0f; }

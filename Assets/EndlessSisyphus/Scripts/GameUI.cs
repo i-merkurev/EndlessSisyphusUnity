@@ -42,7 +42,7 @@ namespace EndlessSisyphus
         {
             if (title != null) return;
 
-            displayFont = Resources.Load<Font>("Fonts/CormorantSC-Bold");
+            displayFont = Resources.Load<Font>("Fonts/PressStart2P-Regular");
             uiFont = Resources.Load<Font>("Fonts/Jura-Medium");
             uiStrongFont = Resources.Load<Font>("Fonts/Jura-SemiBold");
             uiBoldFont = Resources.Load<Font>("Fonts/Jura-Bold");
@@ -205,6 +205,45 @@ namespace EndlessSisyphus
             }
         }
 
+        static Rect PixelRect(Rect rect, float pixelScale) => new Rect(
+            Mathf.Round(rect.x / pixelScale),
+            Mathf.Round(rect.y / pixelScale),
+            Mathf.Round(rect.width / pixelScale),
+            Mathf.Round(rect.height / pixelScale));
+
+        void PreparePixelFont(Font font)
+        {
+            if (font != null && font.material != null && font.material.mainTexture != null)
+                font.material.mainTexture.filterMode = FilterMode.Point;
+        }
+
+        void PixelTrackedLabel(Rect rect, string text, GUIStyle style, float tracking, float pixelScale)
+        {
+            PreparePixelFont(style.font);
+            var pixelStyle = new GUIStyle(style)
+            {
+                fontSize = Mathf.Max(1, Mathf.RoundToInt(style.fontSize / pixelScale))
+            };
+            var oldMatrix = GUI.matrix;
+            GUI.matrix = Matrix4x4.Scale(new Vector3(pixelScale, pixelScale, 1f)) * oldMatrix;
+            TrackedLabel(PixelRect(rect, pixelScale), text, pixelStyle,
+                Mathf.Round(tracking / pixelScale));
+            GUI.matrix = oldMatrix;
+        }
+
+        void PixelPassiveLabel(Rect rect, string text, GUIStyle style, float pixelScale)
+        {
+            PreparePixelFont(style.font);
+            var pixelStyle = PassiveText(new GUIStyle(style)
+            {
+                fontSize = Mathf.Max(1, Mathf.RoundToInt(style.fontSize / pixelScale))
+            });
+            var oldMatrix = GUI.matrix;
+            GUI.matrix = Matrix4x4.Scale(new Vector3(pixelScale, pixelScale, 1f)) * oldMatrix;
+            GUI.Label(PixelRect(rect, pixelScale), text, pixelStyle);
+            GUI.matrix = oldMatrix;
+        }
+
         void TrackedOutlinedLabel(Rect rect, string text, GUIStyle style, float tracking, float stroke, Color strokeColor)
         {
             var outlineStyle = PassiveText(new GUIStyle(style));
@@ -224,26 +263,28 @@ namespace EndlessSisyphus
             return width + Mathf.Max(0, text.Length - 1) * tracking;
         }
 
-        void DrawNarrativeLine(Rect rect, GUIStyle regularStyle, GUIStyle keyStyle, float tracking,
+        void DrawNarrativeLine(Rect rect, GUIStyle regularStyle, GUIStyle keyStyle,
             float keyWeight, string firstKey, string middle, string secondKey = null, string suffix = null)
         {
             var regular = PassiveText(new GUIStyle(regularStyle) { alignment = TextAnchor.MiddleLeft, wordWrap = false });
             var key = PassiveText(new GUIStyle(keyStyle) { alignment = TextAnchor.MiddleLeft, wordWrap = false });
-            float firstWidth = TrackedTextWidth(firstKey, key, tracking);
+            float firstWidth = key.CalcSize(new GUIContent(firstKey)).x;
             float middleWidth = regular.CalcSize(new GUIContent(middle)).x;
-            float secondWidth = string.IsNullOrEmpty(secondKey) ? 0f : TrackedTextWidth(secondKey, key, tracking);
+            float secondWidth = string.IsNullOrEmpty(secondKey) ? 0f : key.CalcSize(new GUIContent(secondKey)).x;
             float suffixWidth = string.IsNullOrEmpty(suffix) ? 0f : regular.CalcSize(new GUIContent(suffix)).x;
-            float x = rect.x + (rect.width - firstWidth - middleWidth - secondWidth - suffixWidth) * 0.5f;
+            float segmentGap = Mathf.Max(3f, regular.CalcSize(new GUIContent(" ")).x);
+            float x = rect.x;
 
-            TrackedOutlinedLabel(new Rect(x, rect.y, firstWidth, rect.height), firstKey, key,
-                tracking, keyWeight, key.normal.textColor);
-            x += firstWidth;
+            OutlinedPassiveLabel(new Rect(x, rect.y, firstWidth, rect.height), firstKey, key,
+                keyWeight, key.normal.textColor);
+            x += firstWidth + segmentGap;
             PassiveLabel(new Rect(x, rect.y, middleWidth, rect.height), middle, regular);
             x += middleWidth;
             if (!string.IsNullOrEmpty(secondKey))
             {
-                TrackedOutlinedLabel(new Rect(x, rect.y, secondWidth, rect.height), secondKey, key,
-                    tracking, keyWeight, key.normal.textColor);
+                x += segmentGap;
+                OutlinedPassiveLabel(new Rect(x, rect.y, secondWidth, rect.height), secondKey, key,
+                    keyWeight, key.normal.textColor);
                 x += secondWidth;
             }
             if (!string.IsNullOrEmpty(suffix))
@@ -729,8 +770,8 @@ namespace EndlessSisyphus
             Rect2(new Rect(bx, by, bw * pct, bh), fill);
 
             // высота / рекорд
-            var heightLabel = new GUIStyle(body) { font = displayFont, fontStyle = FontStyle.Normal, fontSize = Mathf.RoundToInt(30f * scale) };
-            var heightValue = new GUIStyle(body) { font = displayFont, fontStyle = FontStyle.Normal, fontSize = Mathf.RoundToInt(30f * scale) };
+            var heightLabel = new GUIStyle(body) { font = uiBoldFont, fontStyle = FontStyle.Normal, fontSize = Mathf.RoundToInt(27f * scale) };
+            var heightValue = new GUIStyle(body) { font = uiBoldFont, fontStyle = FontStyle.Normal, fontSize = Mathf.RoundToInt(27f * scale) };
             DrawMetric(new Rect(w - 430f * scale, 12f * scale, 410f * scale, 44f * scale),
                 "ВЫСОТА", Roman.To(game.Height), heightLabel, heightValue, 2f * scale, 1.5f * scale, 12f * scale, true);
             var right2 = new GUIStyle(hint) { font = uiFont, fontSize = Mathf.RoundToInt(18f * scale), alignment = TextAnchor.UpperRight, normal = { textColor = new Color(0.72f, 0.69f, 0.62f) } };
@@ -764,7 +805,7 @@ namespace EndlessSisyphus
                     }
                 };
                 string ct = game.CarefulBad
-                    ? "ОТКЛЮЧИ C — НЕТ ДОЖДЯ"
+                    ? "ДОЖДЯ НЕТ — ОТКЛЮЧИ C"
                     : exitGrace ? "ДОЖДЬ ПРОШЁЛ — ОТКЛЮЧИ C" : "ОСТОРОЖНО (C)";
                 float carefulY = showQuote ? quoteArea.y - 38f * scale : h - 60f * scale;
                 PassiveLabel(new Rect(w / 2f - 200f * scale, carefulY, 400f * scale, 30f * scale), ct, cs);
@@ -776,7 +817,7 @@ namespace EndlessSisyphus
         string BannerText()
         {
             if (game.WindExitGrace > 0f)
-                return "ВЕТЕР СТИХ — ТОЛКАЙ SPACE";
+                return "ВЕТЕР СТИХ — НАЖИМАЙ SPACE";
 
             switch (game.Obstacle)
             {
@@ -800,7 +841,7 @@ namespace EndlessSisyphus
             float scale = UiScale;
             float contentW = Mathf.Min(Screen.width * 0.72f, 900f * scale);
             float x = (Screen.width - contentW) * 0.5f;
-            float top = Mathf.Max(14f, Screen.height * 0.035f);
+            float top = Mathf.Max(28f * scale, Screen.height * 0.075f);
 
             var startTitle = new GUIStyle(title) { fontSize = Mathf.Max(34, Mathf.RoundToInt(44f * scale)) };
             var epigraph = PassiveText(new GUIStyle(quote)
@@ -850,9 +891,12 @@ namespace EndlessSisyphus
             {
                 font = uiFont,
                 fontSize = Mathf.Max(14, Mathf.RoundToInt(17f * scale)),
+                alignment = TextAnchor.MiddleLeft,
                 normal = { textColor = new Color32(6, 7, 10, 255) }
             });
-            TrackedLabel(new Rect(x, top, contentW, 60f * scale), "БЕСКОНЕЧНЫЙ СИЗИФ", startTitle, 4.5f * scale);
+            float displayPixelScale = scale >= 1.25f ? 3f : 2f;
+            PixelTrackedLabel(new Rect(x, top, contentW, 60f * scale), "БЕСКОНЕЧНЫЙ СИЗИФ", startTitle,
+                4.5f * scale, displayPixelScale);
             DrawTitleDivider(Screen.width * 0.5f, top + 64f * scale, Mathf.Min(170f * scale, contentW * 0.3f), scale);
             PassiveLabel(new Rect(x + 40f * scale, top + 80f * scale, contentW - 80f * scale, 62f * scale), StartQuote, epigraph);
 
@@ -862,25 +906,28 @@ namespace EndlessSisyphus
             TrackedOutlinedLabel(new Rect(tablet.x + 36f * scale, tablet.y + 20f * scale, tablet.width - 72f * scale, 36f * scale),
                 "КАК ПРЕОДОЛЕВАТЬ ПРЕПЯТСТВИЯ", tabletTitle, 1.5f * scale,
                 accentWeight, tabletTitle.normal.textColor);
+            const string introText = "Толкай камень вверх по бесконечному склону — так высоко, как хватит сил.";
             PassiveLabel(new Rect(tablet.x + 46f * scale, tablet.y + 62f * scale, tablet.width - 92f * scale, 42f * scale),
-                "Толкай камень вверх по бесконечному склону — так высоко, как хватит сил.", tabletIntro);
+                introText, tabletIntro);
 
             float storyY = tablet.y + 112f * scale;
             float storyGap = 35f * scale;
-            Rect storyRect = new Rect(tablet.x + 48f * scale, storyY, tablet.width - 96f * scale, 31f * scale);
-            float keyTracking = 0.35f * scale;
-            DrawNarrativeLine(storyRect, narrative, narrativeKey, keyTracking, accentWeight,
-                "ЛЁД", " — держи ", "SPACE", ", чтобы не оступиться.");
+            float introWidth = tabletIntro.CalcSize(new GUIContent(introText)).x;
+            float storyLeft = Mathf.Max(tablet.x + 48f * scale, tablet.center.x - introWidth * 0.5f);
+            Rect storyRect = new Rect(storyLeft, storyY, tablet.xMax - storyLeft - 48f * scale, 31f * scale);
+            DrawNarrativeLine(storyRect, narrative, narrativeKey, accentWeight,
+                "ЛЁД", "— держи", "SPACE", ", чтобы не оступиться.");
             storyRect.y += storyGap;
-            DrawNarrativeLine(storyRect, narrative, narrativeKey, keyTracking, accentWeight,
-                "КРУТОЙ СКЛОН", " — ", "SHIFT + SPACE", ".");
+            DrawNarrativeLine(storyRect, narrative, narrativeKey, accentWeight,
+                "КРУТОЙ СКЛОН", "—", "SHIFT + SPACE", ".");
             storyRect.y += storyGap;
-            DrawNarrativeLine(storyRect, narrative, narrativeKey, keyTracking, accentWeight,
-                "ДОЖДЬ", " — держи камень крепче, ", "С + SPACE", ".");
+            DrawNarrativeLine(storyRect, narrative, narrativeKey, accentWeight,
+                "ДОЖДЬ", "— держи камень крепче:", "C + SPACE", ".");
             storyRect.y += storyGap;
-            DrawNarrativeLine(storyRect, narrative, narrativeKey, keyTracking, accentWeight,
-                "ВЕТЕР", " — замри и ", "НЕ ТРОГАЙ КЛАВИШИ", ".");
-            PassiveLabel(new Rect(tablet.x + 52f * scale, tablet.y + 250f * scale, tablet.width - 104f * scale, 82f * scale),
+            DrawNarrativeLine(storyRect, narrative, narrativeKey, accentWeight,
+                "ВЕТЕР", "— замри и", "НЕ ТРОГАЙ КЛАВИШИ", ".");
+            PassiveLabel(new Rect(storyLeft, tablet.y + 250f * scale,
+                    tablet.xMax - storyLeft - 48f * scale, 82f * scale),
                 "Неверные действия, идущие против природы, отнимают силы Сизифа. Как только силы иссякнут, Сизиф упадёт, и камень скатится к подножью горы.", tabletFinal);
 
             float buttonW = Mathf.Min(contentW * 0.58f, 440f * scale);
@@ -908,7 +955,7 @@ namespace EndlessSisyphus
             });
             GUI.DrawTexture(new Rect(authorX, authorY, logoSize, logoSize), authorLogo, ScaleMode.ScaleToFit, true);
             PassiveLabel(new Rect(authorX + 52f * scale, authorY, authorWidth - 52f * scale, logoSize),
-                "Автор: Иван Меркурьв", authorStyle);
+                "Автор: Иван Меркурьев", authorStyle);
         }
 
         void DrawSettings()
@@ -958,7 +1005,7 @@ namespace EndlessSisyphus
             return result;
         }
 
-        static string RainLabel(float v) => v == 0 ? "выкл" : v < 0.75f ? "редко" : v <= 1.25f ? "обычная" : v <= 2f ? "часто" : "очень часто";
+        static string RainLabel(float v) => v == 0 ? "нет" : v < 0.75f ? "низкая" : v <= 1.25f ? "обычная" : v <= 2f ? "высокая" : "очень высокая";
 
         void DrawOver()
         {
@@ -973,7 +1020,7 @@ namespace EndlessSisyphus
             var overTitle = new GUIStyle(h2)
             {
                 font = displayFont,
-                fontSize = Mathf.Max(36, Mathf.RoundToInt(44f * scale)),
+                fontSize = Mathf.Max(30, Mathf.RoundToInt(34f * scale)),
                 fontStyle = FontStyle.Normal,
                 alignment = TextAnchor.MiddleCenter,
                 wordWrap = false,
@@ -1010,12 +1057,14 @@ namespace EndlessSisyphus
                 normal = { textColor = new Color(0.72f, 0.69f, 0.62f) }
             };
 
-            PassiveLabel(new Rect(titleX, top, titleWidth, 72f * scale),
-                game.FallReason == "slip" ? "СИЗИФ ПОСКОЛЬЗНУЛСЯ" : "СИЛЫ ИССЯКЛИ", overTitle);
+            float displayPixelScale = scale >= 1.25f ? 3f : 2f;
+            PixelPassiveLabel(new Rect(titleX, top, titleWidth, 72f * scale),
+                game.FallReason == "slip" ? "СИЗИФ ПОСКОЛЬЗНУЛСЯ" : "СИЛЫ ИССЯКЛИ", overTitle,
+                displayPixelScale);
             DrawTitleDivider(Screen.width * 0.5f, top + 64f * scale,
                 Mathf.Min(170f * scale, titleWidth * 0.30f), scale);
             PassiveLabel(new Rect(titleX, top + 78f * scale, titleWidth, 42f * scale),
-                game.FallReason == "slip" ? "Камень вырвался — и покатился вниз." : "Руки опустились — камень скатился к подножию.", overReason);
+                game.FallReason == "slip" ? "Камень вырвался и покатился вниз." : "Руки опустились — камень скатился к подножию.", overReason);
             DrawMetric(new Rect(x, top + 126f * scale, width, 50f * scale),
                 "ВЫСОТА", Roman.To(game.Height), overHeightLabel, overHeightValue,
                 2f * scale, 2f * scale, 10f * scale, false);
