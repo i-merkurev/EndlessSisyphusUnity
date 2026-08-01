@@ -7,6 +7,7 @@ using UnityEngine.InputSystem;   // проект с активным новым 
 namespace EndlessSisyphus
 {
     public enum GState { Start, Settings, Playing, Falling, Over }
+    public enum DefeatPhase { None, Slip, StoneRoll, Pause, Rise, Look, Descend }
     public enum ObKind { None, Wind, Rain, Ice, Steep }
     public enum ObPhase { Calm, Warn, Active }
     public enum CritterKind { Eagle, Goat, Raven, Lizard, Snake, Butterfly }
@@ -19,7 +20,7 @@ namespace EndlessSisyphus
         public bool dead, hasLife;
     }
 
-    public class Particle { public bool wind; public float x, y, vx, vy, life; public bool hasLife; }
+    public class Particle { public bool wind; public int style; public float x, y, vx, vy, life; public bool hasLife; }
     public class Ambient { public string t; public float x, y, vx, vy, sw, life; public bool hasLife; public Color32 col; public bool hasCol; }
     public class Cloud { public float x, y, s, sp; }
     public class Erupt { public float x, y, vx, vy, life; public bool lava; }
@@ -39,6 +40,7 @@ namespace EndlessSisyphus
         public GState State = GState.Start;
         public int Best;
         public float Clock;
+        public int RunId { get; private set; }
 
         public float Height, Momentum, Stamina;
         public float LastTapTime, PushAnim;
@@ -48,15 +50,31 @@ namespace EndlessSisyphus
         public ObPhase Phase = ObPhase.Calm;
         public float ObTimer;
         public float IWind, IRain, IIce, ISteep;
+        public int RainVariant, WindVariant;
+        public float FogAmount;
 
-        public float SlipRisk, Shake, Scroll, SfxTimer;
+        public float SlipRisk, Shake, Scroll, SfxTimer, RainExitGrace;
+        public float WindReactionTimer;
+        public float WindExitGrace;
+        float wrongSteepComboTimer;
+        float wrongSteepLastUseTime = float.NegativeInfinity;
         public float StoneAngle, StoneSpinVel;
+        public bool IntroActive;
+        public float IntroT;
 
         // лёд как позиционный участок в мировых координатах
-        public bool IceActive;
+        public bool IceActive, IsOnIce;
         public float IceStart, IceLen;
+        public readonly List<Vector2> IcePatches = new List<Vector2>();
 
-        public float FallT; public string FallReason = "exhausted";
+        // крутые участки тоже существуют в координатах мира и подъезжают к игроку
+        public bool SteepActive, IsOnSteep;
+        public float SteepStart, SteepLen;
+        public readonly List<Vector2> SteepPatches = new List<Vector2>();
+
+        public float FallT, DefeatPhaseT;
+        public DefeatPhase DefeatStage = DefeatPhase.None;
+        public string FallReason = "exhausted";
 
         public readonly List<Particle> Particles = new List<Particle>();
         public readonly List<Cloud> Clouds = new List<Cloud>();
@@ -65,6 +83,9 @@ namespace EndlessSisyphus
         public readonly List<Ambient> Ambient = new List<Ambient>();
 
         float nextEagle = 3f, nextCritter = 1.5f, nextErupt = 4f, seasonTimer = 0f;
+        float rainSpawnBudget, windSpawnBudget, fogTimer = 18f, fogTarget;
+        bool fogActive;
+        ObKind lastObstacle = ObKind.None;
 
         public DifficultySettings Set;
         WorldRenderer world;
@@ -75,6 +96,42 @@ namespace EndlessSisyphus
         static float Clamp01f(float v, float a, float b) => Mathf.Clamp(v, a, b);
         public static float Hash(float n) { float x = Mathf.Sin(n * 127.1f) * 43758.5453f; return x - Mathf.Floor(x); }
         public float Difficulty() => 1f + Height / GameConfig.RampHeight;
+        public float ActiveIceDistance => IceStart - (Scroll + VW * 0.40f);
+        public float ActiveSteepDistance => SteepStart - (Scroll + VW * 0.40f);
+        public float IntroProgress => IntroActive
+            ? Mathf.Clamp01(IntroT / GameConfig.IntroDuration)
+            : 1f;
+
+        public float SteepElevationAt(float worldX)
+        {
+            float elevation = 0f;
+            float grade = GameConfig.SteepExtraGrade * Set.SteepMul;
+            const float blend = 0.12f;
+            for (int i = 0; i < SteepPatches.Count; i++)
+            {
+                Vector2 patch = SteepPatches[i];
+                if (worldX <= patch.x) continue;
+                if (worldX >= patch.x + patch.y)
+                {
+                    elevation += patch.y * grade;
+                    continue;
+                }
+
+                float u = Mathf.Clamp01((worldX - patch.x) / patch.y);
+                float integrated;
+                if (u < blend)
+                    integrated = u * u / (2f * blend);
+                else if (u > 1f - blend)
+                {
+                    float tail = 1f - u;
+                    integrated = (1f - blend) - tail * tail / (2f * blend);
+                }
+                else
+                    integrated = u - blend * 0.5f;
+                elevation += patch.y * grade * integrated / (1f - blend);
+            }
+            return elevation;
+        }
 
         void Awake()
         {
@@ -92,6 +149,14 @@ namespace EndlessSisyphus
             world = new WorldRenderer(this);
         }
 
+        void Start()
+        {
+            // Музыка принадлежит всему игровому циклу и начинается уже в меню,
+            // а StartGame лишь возвращает её к игровому уровню громкости.
+            audioEngine.StartMusic();
+            audioEngine.RestoreGameplayMusic();
+        }
+
         public AudioEngine Audio => audioEngine;
 
         void Update()
@@ -100,6 +165,7 @@ namespace EndlessSisyphus
             Clock += dt;
             HandleInput();
             Tick(dt);
+            audioEngine.Tick(dt);
             UpdateAmbience(dt);
             world.Render();
         }
@@ -116,29 +182,31 @@ namespace EndlessSisyphus
             bool spaceHeld = kb != null && kb.spaceKey.isPressed;
             bool mouseHeld = ms != null && ms.leftButton.isPressed;
             bool shift = kb != null && (kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed);
-            bool ctrlDown = kb != null && (kb.leftCtrlKey.wasPressedThisFrame || kb.rightCtrlKey.wasPressedThisFrame);
+            bool carefulDown = kb != null && kb.cKey.wasPressedThisFrame;
             bool escDown = kb != null && kb.escapeKey.wasPressedThisFrame;
             bool rDown = kb != null && kb.rKey.wasPressedThisFrame;
-            bool mDown = kb != null && kb.mKey.wasPressedThisFrame;
+            bool difficultyDown = kb != null && kb.dKey.wasPressedThisFrame;
 #else
             bool spaceDownNow = Input.GetKeyDown(KeyCode.Space);
             bool mouseDownNow = Input.GetMouseButtonDown(0);
             bool spaceHeld = Input.GetKey(KeyCode.Space);
             bool mouseHeld = Input.GetMouseButton(0);
             bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-            bool ctrlDown = Input.GetKeyDown(KeyCode.LeftControl) || Input.GetKeyDown(KeyCode.RightControl);
+            bool carefulDown = Input.GetKeyDown(KeyCode.C);
             bool escDown = Input.GetKeyDown(KeyCode.Escape);
             bool rDown = Input.GetKeyDown(KeyCode.R);
-            bool mDown = Input.GetKeyDown(KeyCode.M);
+            bool difficultyDown = Input.GetKeyDown(KeyCode.D);
 #endif
-            if (spaceDownNow) OnPushStart();                                   // старт/толчок с клавиатуры
-            if (mouseDownNow && State == GState.Playing) RegisterTap();        // мышь тапает только в игре (не мешает кнопкам UI)
-            SpaceDown = spaceHeld || (mouseHeld && State == GState.Playing);
+            // Shift обновляется до обработки Space: одновременное Shift + Space
+            // должно считаться правильной комбинацией уже на первом толчке.
             ShiftDown = shift;
-            if (ctrlDown) ToggleCareful();
+            if (spaceDownNow) OnPushStart();                                   // старт/толчок с клавиатуры
+            if (mouseDownNow && State == GState.Playing && !IntroActive) RegisterTap(); // мышь тапает только в игре
+            SpaceDown = !IntroActive && (spaceHeld || (mouseHeld && State == GState.Playing));
+            if (carefulDown) ToggleCareful();
             if (escDown) { if (State == GState.Settings) CloseSettings(); else GoMenu(); }
             if (rDown) { if (State == GState.Playing || State == GState.Over || State == GState.Falling) StartGame(); }
-            if (mDown) ToggleSound();
+            if (difficultyDown && State == GState.Start) OpenSettings();
         }
 
         public void OnPushStart()
@@ -146,85 +214,170 @@ namespace EndlessSisyphus
             if (State == GState.Settings) return;
             audioEngine.StartMusic();
             if (State == GState.Start || State == GState.Over) { StartGame(); return; }
-            if (State == GState.Playing) RegisterTap();
+            if (State == GState.Playing && !IntroActive) RegisterTap();
         }
 
-        public void ToggleSound() { audioEngine.ToggleMute(); }
-        public void ToggleCareful() { if (State != GState.Playing) return; Careful = !Careful; }
+        public void ToggleCareful() { if (State != GState.Playing || IntroActive) return; Careful = !Careful; }
 
         // ================= Экраны =================
         public void StartGame()
         {
-            audioEngine.StartMusic(); audioEngine.WindStop();
+            audioEngine.StartMusic(); audioEngine.RestoreGameplayMusic();
+            audioEngine.WindStop(); audioEngine.RainStop();
+            RunId++;
             State = GState.Playing;
             Height = 0; Momentum = 0; Stamina = GameConfig.StaminaMax;
             LastTapTime = Time.time; PushAnim = 0;
             Careful = false; CarefulBad = false;
             Obstacle = ObKind.None; Phase = ObPhase.Calm; ObTimer = Rand(3f, 4.5f);
-            IceActive = false; SlipRisk = 0; Scroll = 0; Shake = 0; SfxTimer = 0;
+            IceActive = IsOnIce = false;
+            SteepActive = IsOnSteep = false;
+            SlipRisk = 0; Scroll = 0; Shake = 0; SfxTimer = 0;
+            RainExitGrace = 0;
+            WindReactionTimer = 0;
+            WindExitGrace = 0;
+            wrongSteepComboTimer = 0;
+            wrongSteepLastUseTime = float.NegativeInfinity;
+            IcePatches.Clear();
+            SteepPatches.Clear();
+            RainVariant = WindVariant = 0;
+            lastObstacle = ObKind.None;
+            rainSpawnBudget = windSpawnBudget = 0f;
+            FogAmount = fogTarget = 0f;
+            fogActive = false;
+            fogTimer = Rand(8f, 13f);
             StoneAngle = 0; StoneSpinVel = 0;
+            IntroActive = true;
+            IntroT = 0f;
+            FallT = DefeatPhaseT = 0;
+            DefeatStage = DefeatPhase.None;
             IWind = IRain = IIce = ISteep = 0;
             Particles.Clear();
+            Critters.RemoveAll(c => c.kind == CritterKind.Snake);
         }
 
-        public void GoMenu() { State = GState.Start; audioEngine.WindStop(); }
+        public void GoMenu() { State = GState.Start; DefeatStage = DefeatPhase.None; audioEngine.RestoreGameplayMusic(); audioEngine.WindStop(); audioEngine.RainStop(); }
         public void OpenSettings() { State = GState.Settings; }
         public void CloseSettings() { State = GState.Start; }
 
         // ================= Толчок =================
         public void RegisterTap()
         {
+            if (IntroActive) return;
             float now = Time.time, interval = now - LastTapTime; LastTapTime = now; PushAnim = 1;
+            if (ShiftDown && !IsOnSteep)
+            {
+                if (now - wrongSteepLastUseTime > GameConfig.WrongSteepComboWindow)
+                    wrongSteepComboTimer = 0f;
+                wrongSteepLastUseTime = now;
+                if (wrongSteepComboTimer >= GameConfig.WrongSteepComboGrace)
+                    Stamina = Mathf.Max(0f, Stamina -
+                        GameConfig.ErrWrongSteepComboTap * Set.DrainMul);
+            }
+            else if (!IsOnSteep)
+            {
+                // Обычный толчок сразу завершает серию неверного сочетания.
+                wrongSteepComboTimer = 0f;
+                wrongSteepLastUseTime = float.NegativeInfinity;
+            }
             float factor;
             if (interval < GameConfig.MashInterval) factor = 0.3f;
             else { float diff = Mathf.Abs(interval - GameConfig.IdealInterval); factor = Mathf.Clamp(1 - diff * 1.5f, 0.35f, 1f); }
             ObKind active = ActiveObstacle();
             float impulse = GameConfig.TapImpulse * factor;
             if (ShiftDown) impulse *= GameConfig.ShiftBoost;
-            if (active == ObKind.Wind) { impulse *= 0.1f; Stamina -= GameConfig.ErrWindTap * Set.DrainMul; audioEngine.Error(); }
+            if (active == ObKind.Steep) impulse *= GameConfig.SteepPushSpeedMul;
+            if (active == ObKind.Wind)
+            {
+                impulse *= 0.1f;
+                if (WindReactionTimer <= 0f)
+                    Stamina -= GameConfig.ErrWindTap * Set.DrainMul;
+            }
             if (active == ObKind.Rain) impulse *= GameConfig.RainPushMul;
-            Momentum += impulse; audioEngine.Push(factor);
+            Momentum += impulse;
+            if (active == ObKind.Wind) audioEngine.WindResistance(factor);
+            else if (active == ObKind.Steep) audioEngine.SteepPush(factor);
+            else if (active == ObKind.Rain) audioEngine.RainPush(factor);
+            else audioEngine.Push(factor);
         }
 
         public ObKind ActiveObstacle()
         {
             if (IWind > 0.5f) return ObKind.Wind;
             if (IRain > 0.5f) return ObKind.Rain;
-            if (IIce > 0.5f) return ObKind.Ice;
-            if (ISteep > 0.5f) return ObKind.Steep;
+            if (IsOnIce) return ObKind.Ice;
+            if (IsOnSteep) return ObKind.Steep;
             return ObKind.None;
         }
 
         // ================= Планировщик препятствий =================
         void UpdateObstacles(float dt)
         {
+            RainExitGrace = Mathf.Max(0f, RainExitGrace - dt);
+            WindReactionTimer = Mathf.Max(0f, WindReactionTimer - dt);
+            WindExitGrace = Mathf.Max(0f, WindExitGrace - dt);
             ObTimer -= dt;
-            if (Obstacle != ObKind.Ice && ObTimer <= 0f)
+            if (Obstacle != ObKind.Ice && Obstacle != ObKind.Steep && ObTimer <= 0f)
             {
                 if (Phase == ObPhase.Calm)
                 {
                     Obstacle = PickObstacle();
-                    bool telegraph = (Obstacle == ObKind.Ice || Obstacle == ObKind.Steep);
+                    if (Obstacle == ObKind.Rain) RainVariant = Random.Range(0, 3);
+                    if (Obstacle == ObKind.Wind) WindVariant = Random.Range(0, 3);
                     if (Obstacle == ObKind.Ice) StartIce();
-                    else if (telegraph) { Phase = ObPhase.Warn; ObTimer = GameConfig.WarnLead; }
-                    else { Phase = ObPhase.Active; ObTimer = ObstacleDuration(); if (Obstacle == ObKind.Wind) audioEngine.WindStart(); }
+                    else if (Obstacle == ObKind.Steep) StartSteep();
+                    else if (Obstacle == ObKind.Rain)
+                    {
+                        Phase = ObPhase.Warn;
+                        ObTimer = GameConfig.RainWarnLead;
+                    }
+                    else
+                    {
+                        Phase = ObPhase.Active;
+                        ObTimer = ObstacleDuration();
+                        if (Obstacle == ObKind.Wind)
+                        {
+                            WindReactionTimer = GameConfig.WindReactionGrace;
+                            audioEngine.WindStart();
+                        }
+                    }
                 }
-                else if (Phase == ObPhase.Warn) { Phase = ObPhase.Active; ObTimer = ObstacleDuration(); }
-                else { if (Obstacle == ObKind.Wind) audioEngine.WindStop(); Obstacle = ObKind.None; Phase = ObPhase.Calm; ObTimer = Rand(GameConfig.CalmMin, GameConfig.CalmMax) / Mathf.Sqrt(Difficulty()) / Set.FreqMul; }
+                else if (Phase == ObPhase.Warn)
+                {
+                    Phase = ObPhase.Active;
+                    ObTimer = ObstacleDuration();
+                    if (Obstacle == ObKind.Rain) audioEngine.RainStart(RainVariant);
+                }
+                else
+                {
+                    if (Obstacle == ObKind.Wind)
+                    {
+                        audioEngine.WindStop();
+                        WindReactionTimer = 0f;
+                        WindExitGrace = GameConfig.WindExitGrace;
+                    }
+                    if (Obstacle == ObKind.Rain)
+                    {
+                        audioEngine.RainStop();
+                        RainExitGrace = GameConfig.RainExitGrace;
+                    }
+                    Obstacle = ObKind.None; Phase = ObPhase.Calm;
+                    ObTimer = Rand(GameConfig.CalmMin, GameConfig.CalmMax) / Mathf.Sqrt(Difficulty()) / Set.FreqMul;
+                }
             }
 
-            // ветер / дождь / крутизна — интенсивность по фазе
+            // Дождь начинается только после двухсекундной подсказки.
             IWind += (TargetFor(ObKind.Wind) - IWind) * Mathf.Clamp(5f * dt, 0, 1);
             IRain += (TargetFor(ObKind.Rain) - IRain) * Mathf.Clamp(5f * dt, 0, 1);
-            ISteep += (TargetFor(ObKind.Steep) - ISteep) * Mathf.Clamp(1.1f * dt, 0, 1);
 
             UpdateIce(dt);
+            UpdateSteep();
         }
 
         float TargetFor(ObKind k)
         {
             if (Obstacle != k) return 0f;
-            return Phase == ObPhase.Warn ? 0.35f : (Phase == ObPhase.Active ? 1f : 0f);
+            return Phase == ObPhase.Active ? 1f : 0f;
         }
 
         void StartIce()
@@ -233,21 +386,71 @@ namespace EndlessSisyphus
             IceStart = sisX + VW * GameConfig.IceLeadDist;
             IceLen = Rand(GameConfig.IceLenMin, GameConfig.IceLenMax);
             IceActive = true;
-            Obstacle = ObKind.Ice; Phase = ObPhase.Active; ObTimer = 16f;
+            IcePatches.Add(new Vector2(IceStart, IceLen));
+            Obstacle = ObKind.Ice; Phase = ObPhase.Active; ObTimer = 22f;
         }
 
         void UpdateIce(float dt)
         {
             float sisX = Scroll + VW * 0.40f;
-            bool onIce = IceActive && sisX >= IceStart && sisX <= IceStart + IceLen;
-            IIce += ((onIce ? 1f : 0f) - IIce) * Mathf.Clamp(1.4f * dt, 0, 1);
+            IcePatches.RemoveAll(p => p.x + p.y - Scroll < -48f);
+            bool onIce = false;
+            for (int i = 0; i < IcePatches.Count; i++)
+            {
+                Vector2 patch = IcePatches[i];
+                if (sisX >= patch.x && sisX <= patch.x + patch.y) { onIce = true; break; }
+            }
+            IsOnIce = onIce;
+            IIce = onIce ? 1f : 0f;
             if (Obstacle == ObKind.Ice)
             {
                 bool passed = IceActive && (sisX > IceStart + IceLen + 6f || (IceStart + IceLen - Scroll) < -24f);
-                if (passed || ObTimer <= 0f)
+                if (passed)
                 {
                     Obstacle = ObKind.None; Phase = ObPhase.Calm; IceActive = false;
                     ObTimer = Rand(GameConfig.CalmMin, GameConfig.CalmMax) / Mathf.Sqrt(Difficulty()) / Set.FreqMul;
+                }
+            }
+        }
+
+        void StartSteep()
+        {
+            float sisX = Scroll + VW * 0.40f;
+            SteepStart = sisX + VW * GameConfig.SteepLeadDist;
+            SteepLen = Rand(GameConfig.SteepLenMin, GameConfig.SteepLenMax);
+            SteepActive = true;
+            SteepPatches.Add(new Vector2(SteepStart, SteepLen));
+            Obstacle = ObKind.Steep;
+            Phase = ObPhase.Active;
+            ObTimer = 24f;
+        }
+
+        void UpdateSteep()
+        {
+            float sisX = Scroll + VW * 0.40f;
+            IsOnSteep = false;
+            for (int i = 0; i < SteepPatches.Count; i++)
+            {
+                Vector2 patch = SteepPatches[i];
+                if (sisX >= patch.x && sisX <= patch.x + patch.y)
+                {
+                    IsOnSteep = true;
+                    break;
+                }
+            }
+            ISteep = IsOnSteep ? 1f : 0f;
+
+            if (Obstacle == ObKind.Steep)
+            {
+                bool passed = SteepActive &&
+                    (sisX > SteepStart + SteepLen + 6f || (SteepStart + SteepLen - Scroll) < -24f);
+                if (passed)
+                {
+                    Obstacle = ObKind.None;
+                    Phase = ObPhase.Calm;
+                    SteepActive = false;
+                    ObTimer = Rand(GameConfig.CalmMin, GameConfig.CalmMax) /
+                        Mathf.Sqrt(Difficulty()) / Set.FreqMul;
                 }
             }
         }
@@ -261,14 +464,24 @@ namespace EndlessSisyphus
 
         ObKind PickObstacle()
         {
-            float wWind = 1f, wRain = Set.RainProb, wIce = 1f, wSteep = 0.8f + Height / GameConfig.RampHeight;
+            float wWind = lastObstacle == ObKind.Wind ? 0f : 1f;
+            float wRain = lastObstacle == ObKind.Rain ? 0f : Set.RainProb;
+            float wIce = lastObstacle == ObKind.Ice ? 0f : 1f;
+            float wSteep = lastObstacle == ObKind.Steep ? 0f : 0.8f + Height / GameConfig.RampHeight;
             float total = wWind + wRain + wIce + wSteep;
-            if (total <= 0) return ObKind.Wind;
+            if (total <= 0f)
+            {
+                lastObstacle = lastObstacle == ObKind.Wind ? ObKind.Ice : ObKind.Wind;
+                return lastObstacle;
+            }
             float r = Random.value * total;
-            if ((r -= wWind) <= 0) return ObKind.Wind;
-            if ((r -= wRain) <= 0) return ObKind.Rain;
-            if ((r -= wIce) <= 0) return ObKind.Ice;
-            return ObKind.Steep;
+            ObKind chosen;
+            if (r < wWind) chosen = ObKind.Wind;
+            else if ((r -= wWind) < wRain) chosen = ObKind.Rain;
+            else if ((r -= wRain) < wIce) chosen = ObKind.Ice;
+            else chosen = ObKind.Steep;
+            lastObstacle = chosen;
+            return chosen;
         }
 
         // ================= Главный апдейт =================
@@ -277,35 +490,80 @@ namespace EndlessSisyphus
             if (State == GState.Falling) { UpdateFall(dt); return; }
             if (State != GState.Playing) return;
 
+            if (IntroActive)
+            {
+                IntroT += dt;
+                Momentum = 0f;
+                PushAnim = 0f;
+                SpaceDown = ShiftDown = false;
+                if (IntroT >= GameConfig.IntroDuration)
+                {
+                    IntroT = GameConfig.IntroDuration;
+                    IntroActive = false;
+                    LastTapTime = Time.time;
+                }
+                UpdateParticles(dt);
+                return;
+            }
+
             UpdateObstacles(dt);
 
-            float gravity = GameConfig.Gravity * (1 + (Difficulty() - 1) * 0.35f) * (1 + 0.8f * ISteep * Set.SteepMul);
-            if (ISteep > 0.5f && !(SpaceDown && ShiftDown)) gravity *= 1.6f;
+            bool correctSteepInput = IsOnSteep && SpaceDown && ShiftDown;
+            float gravity = GameConfig.Gravity * (1 + (Difficulty() - 1) * 0.35f) *
+                (1 + 0.8f * (IsOnSteep ? 1f : 0f) * Set.SteepMul);
+            if (correctSteepInput) gravity *= GameConfig.SteepCorrectGravityMul;
+            else if (IsOnSteep) gravity *= 1.6f;
             Momentum -= gravity * dt;
             Momentum -= Momentum * GameConfig.Drag * dt;
-            if (ISteep > 0.5f) Momentum -= GameConfig.SteepDrift * ISteep * Set.SteepMul * dt;
-            if (SpaceDown) Momentum += GameConfig.HoldPush * (1 - 0.9f * IWind) * (1 - GameConfig.RainHoldMul * IRain) * dt;
+            if (IsOnSteep) Momentum -= GameConfig.SteepDrift * Set.SteepMul * dt;
+            if (SpaceDown)
+            {
+                float steepPush = IsOnSteep ? GameConfig.SteepPushSpeedMul : 1f;
+                Momentum += GameConfig.HoldPush * steepPush *
+                    (1 - 0.9f * IWind) * (1 - GameConfig.RainHoldMul * IRain) * dt;
+            }
             Momentum -= 1.5f * IWind * dt;
+            if (IsOnSteep && Momentum > GameConfig.SteepMaxMomentum)
+                Momentum = GameConfig.SteepMaxMomentum;
 
             Height += Momentum * dt;
             if (Height < 0) { Height = 0; if (Momentum < 0) Momentum = 0; }
 
             float drain = 0;
-            if (IWind > 0.5f && SpaceDown) drain += GameConfig.DrainWind;
-            if (IIce > 0.5f && !SpaceDown) drain += GameConfig.DrainIce;
-            if (ISteep > 0.5f && SpaceDown && !ShiftDown) drain += GameConfig.DrainSteep;
-            if (Careful && IRain < 0.5f) drain += GameConfig.DrainCareful;
-            if (IWind < 0.5f && ISteep < 0.5f && Height > GameConfig.GraceHeight && Momentum < -0.05f) drain += GameConfig.DrainRollback;
+            // Нажать C можно сразу после появления предупреждения. Вся фаза
+            // выбранного дождя считается корректной, включая короткое нарастание
+            // визуальной интенсивности в начале активной фазы.
+            bool rainGrace = Obstacle == ObKind.Rain || RainExitGrace > 0f;
+            bool wrongSteepHold = !IsOnSteep && SpaceDown && ShiftDown;
+            bool recentWrongSteepUse = !IsOnSteep &&
+                (wrongSteepHold ||
+                 Time.time - wrongSteepLastUseTime <= GameConfig.WrongSteepComboWindow);
+            if (wrongSteepHold) wrongSteepLastUseTime = Time.time;
+            if (recentWrongSteepUse) wrongSteepComboTimer += dt;
+            else
+            {
+                wrongSteepComboTimer = 0f;
+                if (IsOnSteep) wrongSteepLastUseTime = float.NegativeInfinity;
+            }
+            if (IWind > 0.5f && SpaceDown && WindReactionTimer <= 0f) drain += GameConfig.DrainWind;
+            if (IsOnIce && !SpaceDown) drain += GameConfig.DrainIce;
+            if (IsOnSteep && SpaceDown && !ShiftDown) drain += GameConfig.DrainSteep;
+            if (wrongSteepHold && wrongSteepComboTimer >= GameConfig.WrongSteepComboGrace)
+                drain += GameConfig.DrainWrongSteepCombo;
+            if (Careful && IRain < 0.5f && !rainGrace) drain += GameConfig.DrainCareful;
+            if (IWind < 0.5f && WindExitGrace <= 0f && !IsOnSteep &&
+                Height > GameConfig.GraceHeight && Momentum < -0.05f)
+                drain += GameConfig.DrainRollback;
             Stamina = Mathf.Clamp(Stamina - drain * dt * Set.DrainMul, 0, GameConfig.StaminaMax);
             if (Stamina <= 0) { StartFall("exhausted"); return; }
-            CarefulBad = Careful && IRain < 0.5f;
+            CarefulBad = Careful && IRain < 0.5f && !rainGrace;
 
             // звуки поверхности
             SfxTimer -= dt;
             if (SfxTimer <= 0f)
             {
-                if (IIce > 0.5f && SpaceDown && Mathf.Abs(Momentum) > 0.15f) { audioEngine.Ice(); SfxTimer = Rand(0.09f, 0.16f); }
-                else if (ISteep > 0.5f && SpaceDown) { audioEngine.Friction(); SfxTimer = Rand(0.16f, 0.24f); }
+                if (IsOnIce && Mathf.Abs(Momentum) > 0.15f) { audioEngine.Ice(); SfxTimer = Rand(0.34f, 0.48f); }
+                else if (IsOnSteep && SpaceDown) { audioEngine.Friction(); SfxTimer = Rand(0.16f, 0.24f); }
                 else SfxTimer = 0.1f;
             }
 
@@ -324,22 +582,79 @@ namespace EndlessSisyphus
 
         void StartFall(string reason)
         {
-            State = GState.Falling; FallT = 0; FallReason = reason;
-            Shake = 1.4f; StoneSpinVel = -3f;
-            audioEngine.WindStop(); audioEngine.Rumble();
+            State = GState.Falling;
+            FallT = DefeatPhaseT = 0;
+            DefeatStage = DefeatPhase.Slip;
+            FallReason = reason;
+            Momentum = 0;
+            SpaceDown = ShiftDown = Careful = CarefulBad = false;
+            wrongSteepComboTimer = 0f;
+            wrongSteepLastUseTime = float.NegativeInfinity;
+            Shake = 0.65f;
+            StoneSpinVel = -1.2f;
+            audioEngine.WindStop();
+            audioEngine.RainStop();
+            audioEngine.BeginDefeat(reason);
         }
 
         void UpdateFall(float dt)
         {
-            FallT += dt; Shake = Mathf.Max(0, Shake - dt * 1.2f);
-            StoneAngle += StoneSpinVel * dt; StoneSpinVel -= 2f * dt;
-            Scroll -= dt * 120f;
-            if (FallT > 1.5f) EndGame(FallReason);
+            FallT += dt;
+            DefeatPhaseT += dt;
+            Shake = Mathf.Max(0, Shake - dt * 1.8f);
+            PushAnim = Mathf.Max(0f, PushAnim - dt * 5f);
+            UpdateParticles(dt);
+
+            if (DefeatStage == DefeatPhase.Slip)
+            {
+                StoneAngle += StoneSpinVel * dt;
+                StoneSpinVel -= 1.2f * dt;
+            }
+            else if (DefeatStage == DefeatPhase.StoneRoll)
+            {
+                StoneSpinVel = Mathf.MoveTowards(StoneSpinVel, -8.5f, 6.5f * dt);
+                StoneAngle += StoneSpinVel * dt;
+            }
+
+            float duration = DefeatPhaseDuration(DefeatStage);
+            while (DefeatStage != DefeatPhase.None && DefeatPhaseT >= duration)
+            {
+                DefeatPhaseT -= duration;
+                if (DefeatStage == DefeatPhase.Descend)
+                {
+                    DefeatPhaseT = duration;
+                    EndGame(FallReason);
+                    return;
+                }
+                DefeatStage = (DefeatPhase)((int)DefeatStage + 1);
+                audioEngine.EnterDefeatPhase(DefeatStage);
+                duration = DefeatPhaseDuration(DefeatStage);
+            }
         }
+
+        static float DefeatPhaseDuration(DefeatPhase phase)
+        {
+            switch (phase)
+            {
+                case DefeatPhase.Slip: return 0.45f;
+                case DefeatPhase.StoneRoll: return 1.8f;
+                case DefeatPhase.Pause: return 0.85f;
+                case DefeatPhase.Rise: return 0.75f;
+                case DefeatPhase.Look: return 2f;
+                case DefeatPhase.Descend: return 5.5f;
+                default: return 0.01f;
+            }
+        }
+
+        public float DefeatPhaseProgress =>
+            DefeatStage == DefeatPhase.None
+                ? 0f
+                : Mathf.Clamp01(DefeatPhaseT / DefeatPhaseDuration(DefeatStage));
 
         void EndGame(string reason)
         {
-            State = GState.Over; audioEngine.GameOver();
+            State = GState.Over;
+            audioEngine.HoldDefeatMusic();
             int h = Mathf.FloorToInt(Height);
             if (h > Best) { Best = h; PlayerPrefs.SetInt("sisyphus_best", Best); PlayerPrefs.Save(); }
         }
@@ -349,14 +664,61 @@ namespace EndlessSisyphus
         // ================= Частицы погоды =================
         void UpdateParticles(float dt)
         {
-            if (IRain > 0.3f)
-                for (int i = 0; i < Mathf.Ceil(IRain * 2); i++)
-                    Particles.Add(new Particle { wind = false, x = Rand(0, VW), y = -4, vy = Rand(220, 300), vx = -40 });
-            if (IWind > 0.3f)
-                Particles.Add(new Particle { wind = true, x = VW + 6, y = Rand(0, VH * 0.7f), vx = Rand(-260, -200), vy = Rand(-8, 8), life = 0.9f, hasLife = true });
+            if (IRain > 0.05f)
+            {
+                float rate = RainVariant == 0 ? 42f : RainVariant == 1 ? 92f : 165f;
+                rainSpawnBudget += rate * IRain * dt;
+                while (rainSpawnBudget >= 1f)
+                {
+                    rainSpawnBudget -= 1f;
+                    float vx = RainVariant == 0 ? Rand(-24f, -12f) :
+                        RainVariant == 1 ? Rand(-48f, -32f) : Rand(-78f, -56f);
+                    float vy = RainVariant == 0 ? Rand(135f, 185f) :
+                        RainVariant == 1 ? Rand(220f, 300f) : Rand(310f, 410f);
+                    Particles.Add(new Particle
+                    {
+                        wind = false,
+                        style = RainVariant,
+                        x = Rand(0, VW + 12f),
+                        y = -6f,
+                        vx = vx,
+                        vy = vy
+                    });
+                }
+            }
+            else rainSpawnBudget = 0f;
+
+            if (IWind > 0.05f)
+            {
+                float rate = WindVariant == 0 ? 15f : WindVariant == 1 ? 28f : 22f;
+                windSpawnBudget += rate * IWind * dt;
+                while (windSpawnBudget >= 1f)
+                {
+                    windSpawnBudget -= 1f;
+                    Particles.Add(new Particle
+                    {
+                        wind = true,
+                        style = WindVariant,
+                        x = VW + 8f,
+                        y = Rand(0, VH * 0.72f),
+                        vx = WindVariant == 0 ? Rand(-215f, -175f) :
+                            WindVariant == 1 ? Rand(-330f, -250f) : Rand(-275f, -215f),
+                        vy = WindVariant == 2 ? Rand(-18f, 18f) : Rand(-6f, 6f),
+                        life = WindVariant == 1 ? 0.65f : 1.05f,
+                        hasLife = true
+                    });
+                }
+            }
+            else windSpawnBudget = 0f;
+
             for (int i = Particles.Count - 1; i >= 0; i--)
             {
-                var p = Particles[i]; p.x += p.vx * dt; p.y += p.vy * dt; if (p.hasLife) p.life -= dt;
+                var p = Particles[i];
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                if (p.wind && p.style == 2)
+                    p.y += Mathf.Sin(Clock * 7f + p.x * 0.08f) * 18f * dt;
+                if (p.hasLife) p.life -= dt;
                 if (!(p.y < VH + 6 && p.x > -20 && (!p.hasLife || p.life > 0))) Particles.RemoveAt(i);
             }
         }
@@ -366,6 +728,33 @@ namespace EndlessSisyphus
 
         void UpdateAmbience(float dt)
         {
+            if (State == GState.Playing)
+            {
+                fogTimer -= dt;
+                if (fogTimer <= 0f)
+                {
+                    if (!fogActive && Height >= 15f)
+                    {
+                        fogActive = true;
+                        fogTarget = Rand(0.30f, 0.40f) + Mathf.Clamp01(Height / 600f) * 0.12f;
+                        fogTimer = Rand(10f, 17f);
+                    }
+                    else if (fogActive)
+                    {
+                        fogActive = false;
+                        fogTarget = 0f;
+                        fogTimer = Rand(18f, 30f);
+                    }
+                    else fogTimer = Rand(6f, 10f);
+                }
+            }
+            else if (State != GState.Falling)
+            {
+                fogActive = false;
+                fogTarget = 0f;
+            }
+            FogAmount = Mathf.MoveTowards(FogAmount, fogTarget, dt * (fogActive ? 0.10f : 0.085f));
+
             foreach (var c in Clouds) { c.x += (c.sp / VW) * dt; if (c.x > 1.2f) { c.x = -0.2f; c.y = Rand(0.06f, 0.36f); } }
 
             nextErupt -= dt;
@@ -376,7 +765,7 @@ namespace EndlessSisyphus
             if (nextEagle <= 0) { nextEagle = Rand(8, 16); float dir = Random.value < 0.5f ? 1 : -1; Critters.Add(new Critter { kind = CritterKind.Eagle, x = dir > 0 ? -20 : VW + 20, y = Rand(VH * 0.10f, VH * 0.38f), dir = dir, sp = Rand(14, 24), w = 0 }); }
 
             nextCritter -= dt;
-            if (nextCritter <= 0) { nextCritter = Rand(3, 6); SpawnCritter((CritterKind)new int[] { 1, 1, 2, 3, 4, 5 }[Mathf.FloorToInt(Rand(0, 6))]); }
+            if (nextCritter <= 0) { nextCritter = Rand(3, 6); SpawnCritter((CritterKind)new int[] { 1, 1, 2, 3, 5, 5 }[Mathf.FloorToInt(Rand(0, 6))]); }
             for (int i = Critters.Count - 1; i >= 0; i--) { UpdateCritter(Critters[i], dt); if (Critters[i].dead) Critters.RemoveAt(i); }
 
             // сезонные частицы

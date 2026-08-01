@@ -19,6 +19,12 @@ namespace EndlessSisyphus
         Transform root;
         SpriteRenderer bgSR, sisSR, bouSR;
         bool spriteReady;
+        bool skyParallaxReady;
+        float skyParallaxScroll;
+        float steepActorBlend;
+
+        const float WorldBreathAmount = 0.01f;
+        const float WorldBreathPeriod = 10f;
 
         /// <summary>true — герои рисуются в процедурном слое (по умолчанию, гарантированно верно).
         /// false — рисуй их своими спрайтами через sisSR/bouSR.</summary>
@@ -26,18 +32,33 @@ namespace EndlessSisyphus
 
         // геометрия склона текущего кадра
         float ang, baseY;
-        float SlopeY(float x) => baseY - x * ang;
+        float TerrainWave(float worldX) =>
+            Mathf.Sin(worldX * 0.024f) * 6.2f +
+            Mathf.Sin(worldX * 0.067f + 1.7f) * 2.4f;
+        float SlopeY(float x)
+        {
+            float worldX = x + g.Scroll;
+            float heroWorldX = g.Scroll + VW * 0.40f;
+            float localSteepRise = g.SteepElevationAt(worldX) - g.SteepElevationAt(heroWorldX);
+            return baseY - x * ang + TerrainWave(worldX) - localSteepRise;
+        }
+        float SlopeRotation(float x) => Mathf.Atan((SlopeY(x + 2f) - SlopeY(x - 2f)) * 0.25f);
 
         // силуэт валуна (порт BOULDER)
-        readonly Vector2[] boulder = new Vector2[14];
+        const int BoulderRadius = 19;
+        const float BoulderOffset = 25f;
+        const float SteepBoulderOffset = 18f;
+        const float HeroScale = 1.18f;
+        readonly Vector2[] boulder = new Vector2[20];
 
         public WorldRenderer(SisyphusGame game)
         {
             g = game; VW = g.VW; VH = g.VH;
             bg = new PixelCanvas(VW, VH);
-            for (int i = 0; i < 14; i++)
+            for (int i = 0; i < boulder.Length; i++)
             {
-                float a = (i / 14f) * Mathf.PI * 2f, r = 0.82f + SisyphusGame.Hash(i * 3.3f) * 0.36f;
+                float a = (i / (float)boulder.Length) * Mathf.PI * 2f;
+                float r = 0.97f + (SisyphusGame.Hash(i * 3.3f) - 0.5f) * 0.08f;
                 boulder[i] = new Vector2(Mathf.Cos(a) * r, Mathf.Sin(a) * r);
             }
             SetupObjects();
@@ -74,7 +95,10 @@ namespace EndlessSisyphus
         // ============================================================ РЕНДЕР
         public void Render()
         {
+            steepActorBlend = Mathf.MoveTowards(steepActorBlend, g.IsOnSteep ? 1f : 0f,
+                Mathf.Min(Time.unscaledDeltaTime, 0.05f) * 3.5f);
             float night = Nightness();
+            UpdateSkyParallax();
             DrawSky(night); DrawCelestial(night); DrawStars(night); DrawClouds();
             DrawFarRanges(); DrawVolcano();
             DrawMountainCritters(); DrawEagles();
@@ -82,6 +106,7 @@ namespace EndlessSisyphus
             if (DrawHeroesInBackdrop) DrawActor();
             DrawAmbient();
             DrawWeather();
+            DrawFog();
             DrawSeasonTint();
 
             var tex = bg.ToTexture();
@@ -91,31 +116,131 @@ namespace EndlessSisyphus
                 spriteReady = true;
             }
 
-            // тряска — сдвиг всего мира
+            // Едва заметное «дыхание» мира вокруг горизонта. Минимальный масштаб
+            // остаётся равным 1, чтобы при выдохе по краям кадра не появлялся фон камеры.
+            float breathPhase = Time.unscaledTime * (Mathf.PI * 2f / WorldBreathPeriod) - Mathf.PI * 0.5f;
+            float breath01 = (Mathf.Sin(breathPhase) + 1f) * 0.5f;
+            float breathScale = 1f + WorldBreathAmount * breath01;
+            root.localScale = new Vector3(breathScale, breathScale, 1f);
+
+            Vector3 breathPivot = new Vector3(VW * 0.5f, VH * 0.60f, 0f);
+            Vector3 breathOffset = breathPivot * (1f - breathScale);
+
+            // тряска — дополнительный сдвиг всего мира
             float sh = g.Shake > 0 ? g.Shake * 3f : 0f;
-            root.position = sh > 0 ? new Vector3(Mathf.Round(Random.Range(-sh, sh)), Mathf.Round(Random.Range(-sh, sh)), 0) : Vector3.zero;
+            Vector3 shakeOffset = sh > 0
+                ? new Vector3(Mathf.Round(Random.Range(-sh, sh)), Mathf.Round(Random.Range(-sh, sh)), 0f)
+                : Vector3.zero;
+            root.position = breathOffset + shakeOffset;
 
             UpdateHeroTransforms();
         }
 
         float Nightness() => (1 - Mathf.Cos((g.Clock / GameConfig.DayLen) * Mathf.PI * 2f)) / 2f;
 
+        void UpdateSkyParallax()
+        {
+            if (!skyParallaxReady || g.Scroll + VW < skyParallaxScroll)
+            {
+                skyParallaxScroll = g.Scroll;
+                skyParallaxReady = true;
+                return;
+            }
+
+            float dt = Mathf.Min(Time.unscaledDeltaTime, 0.05f);
+            float follow = 1f - Mathf.Exp(-dt * 3.2f);
+            skyParallaxScroll = Mathf.Lerp(skyParallaxScroll, g.Scroll, follow);
+        }
+
+        static int PositiveMod(int value, int modulus)
+        {
+            int result = value % modulus;
+            return result < 0 ? result + modulus : result;
+        }
+
         // canvas-точка (y-вниз) → миров. координата (y-вверх) для спрайт-объектов
         Vector3 ToWorld(float cx, float cyDown) => new Vector3(cx, VH - cyDown, 0);
 
-        void UpdateHeroTransforms()
+        void ActorLayout(out float stoneX, out float heroX, out float tumble, out bool showStone)
         {
             float px = VW * 0.40f;
-            bool falling = g.State == GState.Falling;
-            float extra = 0, tumble = 0;
-            if (falling) { float p = Mathf.Clamp01(g.FallT / 1.5f); extra = p * VW * 0.5f; tumble = p * 6f; }
-            int R = 16;
-            float sx = px + 22 - extra, sy = SlopeY(sx) - 22 * ang - R + 2;
+            // На крутом участке одинаковый экранный отступ превращался в
+            // чрезмерную дистанцию вдоль поверхности. Плавно подтягиваем камень
+            // к вытянутым рукам Сизифа только на таком участке.
+            float stoneOffset = Mathf.Lerp(BoulderOffset, SteepBoulderOffset,
+                Mathf.SmoothStep(0f, 1f, steepActorBlend));
+            stoneX = px + stoneOffset;
+            heroX = px;
+            tumble = 0f;
+            showStone = true;
+
+            if (g.IntroActive)
+            {
+                float approach = Mathf.SmoothStep(0f, 1f, g.IntroProgress);
+                heroX = Mathf.Lerp(-24f, px, approach);
+                return;
+            }
+
+            bool cinematic = g.DefeatStage != DefeatPhase.None &&
+                (g.State == GState.Falling || g.State == GState.Over);
+            if (!cinematic) return;
+
+            float rawProgress = g.DefeatPhaseProgress;
+            float p = Mathf.SmoothStep(0f, 1f, rawProgress);
+            const float fallenRotation = 0.82f;
+            switch (g.DefeatStage)
+            {
+                case DefeatPhase.Slip:
+                    stoneX -= 10f * p;
+                    heroX -= 7f * p;
+                    tumble = fallenRotation * p;
+                    break;
+                case DefeatPhase.StoneRoll:
+                {
+                    float rollingProgress = rawProgress * rawProgress;
+                    stoneX -= Mathf.Lerp(10f, VW * 0.72f, rollingProgress);
+                    heroX -= 7f;
+                    tumble = fallenRotation;
+                    break;
+                }
+                case DefeatPhase.Pause:
+                    stoneX -= VW * 0.72f;
+                    heroX -= 7f;
+                    tumble = fallenRotation;
+                    showStone = false;
+                    break;
+                case DefeatPhase.Rise:
+                    stoneX -= VW * 0.72f;
+                    heroX -= Mathf.Lerp(7f, 3f, p);
+                    tumble = Mathf.Lerp(fallenRotation, 0f, p);
+                    showStone = false;
+                    break;
+                case DefeatPhase.Look:
+                    stoneX -= VW * 0.72f;
+                    heroX -= 3f;
+                    showStone = false;
+                    break;
+                case DefeatPhase.Descend:
+                    stoneX -= VW * 0.72f;
+                    heroX -= 3f + VW * 0.56f * p;
+                    showStone = false;
+                    break;
+            }
+        }
+
+        void UpdateHeroTransforms()
+        {
+            ActorLayout(out float sx, out float hpx, out float tumble, out bool showStone);
+            int R = BoulderRadius;
+            // SlopeY(sx) already contains the complete rise of the terrain at the
+            // boulder's position. Adding the slope angle again made the boulder
+            // float away from Sisyphus on steep patches.
+            float sy = SlopeY(sx) - R + 2;
             bouSR.transform.position = ToWorld(sx, sy);
             bouSR.transform.rotation = Quaternion.Euler(0, 0, -g.StoneAngle * Mathf.Rad2Deg);
-            float hpx = px - extra * 0.9f;
+            bouSR.enabled = showStone;
             sisSR.transform.position = ToWorld(hpx, SlopeY(hpx));
-            sisSR.transform.rotation = Quaternion.Euler(0, 0, (ang - tumble) * Mathf.Rad2Deg);
+            sisSR.transform.rotation = Quaternion.Euler(0, 0, (-SlopeRotation(hpx) - tumble) * Mathf.Rad2Deg);
         }
 
         // ---------- Небо / светила / звёзды / облака ----------
@@ -143,9 +268,11 @@ namespace EndlessSisyphus
         {
             if (night < 0.15f) return;
             float alpha = Mathf.Clamp01((night - 0.15f) * 1.3f);
+            int starOffset = Mathf.RoundToInt(skyParallaxScroll * 0.018f);
             for (int i = 0; i < 55; i++)
             {
-                int x = (int)((i * 71.3f) % VW), y = (int)((i * 47.9f) % (VH * 0.55f));
+                int x = PositiveMod((int)((i * 71.3f) % VW) - starOffset, VW);
+                int y = (int)((i * 47.9f) % (VH * 0.55f));
                 if ((i * 13 + Mathf.FloorToInt(g.Clock * 2)) % 19 != 0) bg.PlotBlend(x, y, new Color32(255, 255, 255, 255), alpha);
             }
         }
@@ -153,9 +280,15 @@ namespace EndlessSisyphus
         void DrawClouds()
         {
             var c = new Color32(230, 230, 245, 255);
+            int cloudOffset = Mathf.RoundToInt(skyParallaxScroll * 0.18f);
+            int wrapWidth = Mathf.RoundToInt(VW * 1.4f);
+            int wrapMargin = Mathf.RoundToInt(VW * 0.2f);
             foreach (var cl in g.Clouds)
             {
-                float cx = Mathf.Floor(cl.x * VW), cy = Mathf.Floor(cl.y * VH), r = 6 * cl.s;
+                int nativeX = Mathf.FloorToInt(cl.x * VW);
+                float cx = PositiveMod(nativeX - cloudOffset + wrapMargin, wrapWidth) - wrapMargin;
+                float cy = Mathf.Floor(cl.y * VH);
+                float r = 6 * cl.s;
                 bg.FillCircle(cx, cy, r, c, 0.16f); bg.FillCircle(cx + r, cy + 2, r * 0.8f, c, 0.16f); bg.FillCircle(cx - r, cy + 2, r * 0.7f, c, 0.16f);
             }
         }
@@ -164,17 +297,18 @@ namespace EndlessSisyphus
         {
             (Color32 col, float h, float amp, float w, float sp)[] layers =
             {
-                (Palette.MountFar, 0.40f, 0.10f, 90f, 0.10f),
-                (Palette.MountMid, 0.48f, 0.13f, 70f, 0.16f),
+                (Palette.MountFar, 0.40f, 0.10f, 90f, 0.06f),
+                (Palette.MountMid, 0.48f, 0.13f, 70f, 0.13f),
             };
+            float heightShift = Mathf.Round(Mathf.Clamp(g.Height * 0.018f, 0f, 8f));
             foreach (var L in layers)
             {
-                float off = (g.Scroll * L.sp) % L.w;
+                float off = Mathf.Round((skyParallaxScroll * L.sp) % L.w);
                 var pts = new List<Vector2> { new Vector2(0, VH) };
                 for (float x = -L.w; x <= VW + L.w; x += L.w)
                 {
-                    pts.Add(new Vector2(x - off + L.w / 2, VH * (L.h - L.amp)));
-                    pts.Add(new Vector2(x - off + L.w, VH * (L.h + L.amp * 0.4f)));
+                    pts.Add(new Vector2(x - off + L.w / 2, Mathf.Round(VH * (L.h - L.amp) + heightShift)));
+                    pts.Add(new Vector2(x - off + L.w, Mathf.Round(VH * (L.h + L.amp * 0.4f) + heightShift)));
                 }
                 pts.Add(new Vector2(VW, VH));
                 bg.FillPolygon(pts.ToArray(), L.col);
@@ -223,10 +357,8 @@ namespace EndlessSisyphus
                         bg.FillRect(x - 2, y + 3, 1, 2 + leg, Palette.GoatDk); bg.FillRect(x + 1, y + 3, 1, 2 - leg, Palette.GoatDk);
                         break;
                     case CritterKind.Snake:
-                        for (int k = 0; k < 7; k++) { int yy = y + Mathf.RoundToInt(Mathf.Sin(cr.w + k * 0.9f) * 1.4f); bg.FillRect(x + k * 2, yy, 2, 2, Palette.Snake); }
-                        for (int k = 1; k < 7; k += 2) { int yy = y + Mathf.RoundToInt(Mathf.Sin(cr.w + k * 0.9f) * 1.4f); bg.FillRect(x + k * 2, yy, 1, 1, Palette.SnakeDk); }
-                        int hy = y - 2 + Mathf.RoundToInt(cr.head); bg.FillRect(x - 2, hy, 3, 3, Palette.Snake);
-                        bg.FillRect(x - 3, hy + 1, 1, 1, new Color32(214, 75, 58, 255));
+                        // Змеи исключены из окружения: тип оставлен для совместимости
+                        // с уже сохранёнными состояниями, но визуально не выводится.
                         break;
                     case CritterKind.Raven:
                         int fl = Mathf.RoundToInt(Mathf.Sin(cr.w) * 2); bg.FillRect(x, y - 3, 2, 4, Palette.Raven);
@@ -245,13 +377,13 @@ namespace EndlessSisyphus
         }
 
         // ---------- Склон ----------
-        float SlopeAngle() => Mathf.Min(0.30f + (g.Difficulty() - 1) * 0.05f + g.ISteep * 0.24f * g.Set.SteepMul, 0.85f);
+        float SlopeAngle() => Mathf.Min(0.30f + (g.Difficulty() - 1) * 0.05f, 0.58f);
 
         void DrawSlope()
         {
             ang = SlopeAngle(); baseY = VH * 0.80f;
 
-            bg.FillPolygon(new[] { new Vector2(0, baseY), new Vector2(VW, SlopeY(VW)), new Vector2(VW, VH), new Vector2(0, VH) }, Palette.Dirt2);
+            bg.FillPolygon(new[] { new Vector2(0, SlopeY(0)), new Vector2(VW, SlopeY(VW)), new Vector2(VW, VH), new Vector2(0, VH) }, Palette.Dirt2);
 
             int cell = 8; float off = g.Scroll % cell;
             for (float sx = -cell; sx < VW + cell; sx += cell)
@@ -315,8 +447,13 @@ namespace EndlessSisyphus
 
         void DrawIce()
         {
-            if (!g.IceActive) return;
-            float x0 = g.IceStart - g.Scroll, x1 = g.IceStart + g.IceLen - g.Scroll;
+            for (int i = 0; i < g.IcePatches.Count; i++)
+                DrawIcePatch(g.IcePatches[i].x, g.IcePatches[i].y);
+        }
+
+        void DrawIcePatch(float start, float length)
+        {
+            float x0 = start - g.Scroll, x1 = start + length - g.Scroll;
             if (x1 < -6 || x0 > VW + 6) return;
             int xa = Mathf.Max(-6, Mathf.FloorToInt(x0)), xb = Mathf.Min(VW + 6, Mathf.CeilToInt(x1));
             var pts = new List<Vector2>();
@@ -402,51 +539,152 @@ namespace EndlessSisyphus
         // ---------- Сизиф и валун (процедурный слой) ----------
         void DrawActor()
         {
-            bool falling = g.State == GState.Falling;
-            float px = VW * 0.40f; int R = 16;
-            float extra = 0, tumble = 0;
-            if (falling) { float p = Mathf.Clamp01(g.FallT / 1.5f); extra = p * VW * 0.5f; tumble = p * 6f; }
-            float sx = px + 22 - extra, sy = SlopeY(sx) - 22 * ang - R + 2;
-            bg.FillEllipse(sx, SlopeY(sx) + 1, R * 0.9f, 3, new Color32(0, 0, 0, 255), 0.3f);
-            DrawBoulder(sx, sy, R, g.StoneAngle);
-            DrawSisyphus(px - extra * 0.9f, SlopeY(px - extra * 0.9f), -ang + tumble, g.PushAnim, falling, g.IRain);
+            ActorLayout(out float sx, out float heroX, out float tumble, out bool showStone);
+            int R = BoulderRadius;
+            if (showStone)
+            {
+                float sy = SlopeY(sx) - R + 2;
+                bg.FillEllipse(sx, SlopeY(sx) + 1, R, 4, new Color32(0, 0, 0, 255), 0.38f);
+                DrawBoulder(sx, sy, R, g.StoneAngle);
+            }
+            DrawSisyphus(heroX, SlopeY(heroX), SlopeRotation(heroX) + tumble,
+                g.PushAnim, g.DefeatStage, g.DefeatPhaseProgress, g.IRain, g.IntroActive);
         }
 
         void DrawBoulder(float x, float y, float R, float aRot)
         {
             float c = Mathf.Cos(aRot), s = Mathf.Sin(aRot);
             Vector2 T(float lx, float ly) => new Vector2(x + lx * c - ly * s, y + lx * s + ly * c);
-            var poly = new Vector2[14];
-            for (int i = 0; i < 14; i++) poly[i] = T(boulder[i].x * R, boulder[i].y * R);
+            var poly = new Vector2[boulder.Length];
+            for (int i = 0; i < boulder.Length; i++) poly[i] = T(boulder[i].x * R, boulder[i].y * R);
             bg.FillPolygon(poly, Palette.StoneMid);
-            var hi = T(-R * 0.3f, -R * 0.35f); bg.FillCircle(hi.x, hi.y, R * 0.7f, Palette.StoneHi);
-            var lo = T(R * 0.4f, R * 0.45f); bg.FillCircle(lo.x, lo.y, R * 0.7f, Palette.StoneLo);
-            var a1 = T(-R * 0.5f, -R * 0.1f); var a2 = T(0, R * 0.2f); var a3 = T(R * 0.5f, -R * 0.1f);
-            bg.Line(a1.x, a1.y, a2.x, a2.y, Palette.StoneCr, 1); bg.Line(a2.x, a2.y, a3.x, a3.y, Palette.StoneCr, 1);
-            var b1 = T(-R * 0.1f, -R * 0.6f); var b2 = T(R * 0.1f, 0); bg.Line(b1.x, b1.y, b2.x, b2.y, Palette.StoneCr, 1);
-            for (int i = 0; i < 8; i++) { float aa = i * 2.399f; var p = T(Mathf.Cos(aa) * R * 0.5f, Mathf.Sin(aa) * R * 0.5f); bg.FillRect(Mathf.RoundToInt(p.x), Mathf.RoundToInt(p.y), 1, 1, Palette.StoneCr); }
+            for (int i = 0; i < poly.Length; i++)
+            {
+                Vector2 a = poly[i], b = poly[(i + 1) % poly.Length];
+                bg.Line(a.x, a.y, b.x, b.y, Palette.StoneCr, 1);
+            }
+            var hi = T(-R * 0.34f, -R * 0.34f);
+            bg.FillEllipse(hi.x, hi.y, R * 0.34f, R * 0.20f, Palette.StoneHi, 0.38f);
+            var lo = T(R * 0.34f, R * 0.38f);
+            bg.FillEllipse(lo.x, lo.y, R * 0.32f, R * 0.18f, Palette.StoneLo, 0.48f);
+
+            // Две неровные трещины начинаются у противоположных краёв и
+            // остаются смещёнными от центра, чтобы не складываться в лицо.
+            var crackA = new[]
+            {
+                T(-R * 0.64f, -R * 0.38f),
+                T(-R * 0.47f, -R * 0.25f),
+                T(-R * 0.55f, -R * 0.08f),
+                T(-R * 0.38f, R * 0.03f)
+            };
+            var crackB = new[]
+            {
+                T(R * 0.61f, R * 0.43f),
+                T(R * 0.43f, R * 0.26f),
+                T(R * 0.24f, R * 0.35f),
+                T(R * 0.13f, R * 0.18f)
+            };
+            bg.StrokePolyline(crackA, Palette.StoneCr, 1);
+            bg.StrokePolyline(crackB, Palette.StoneCr, 1);
+
+            for (int i = 0; i < 7; i++)
+            {
+                float aa = i * 2.399f + 0.4f;
+                float rr = R * (0.35f + SisyphusGame.Hash(i * 4.7f) * 0.28f);
+                var p = T(Mathf.Cos(aa) * rr, Mathf.Sin(aa) * rr);
+                bg.FillRect(Mathf.RoundToInt(p.x), Mathf.RoundToInt(p.y), 1, 1,
+                    i % 3 == 0 ? Palette.StoneHi : Palette.StoneCr);
+            }
         }
 
-        void DrawSisyphus(float ox, float oy, float rot, float push, bool falling, float rain)
+        void DrawSisyphus(float ox, float oy, float rot, float push, DefeatPhase defeatPhase,
+            float defeatProgress, float rain, bool approaching)
         {
             float c = Mathf.Cos(rot), s = Mathf.Sin(rot);
+            bool cinematic = defeatPhase != DefeatPhase.None;
+            bool grounded = defeatPhase == DefeatPhase.Slip ||
+                defeatPhase == DefeatPhase.StoneRoll ||
+                defeatPhase == DefeatPhase.Pause;
+            bool descending = defeatPhase == DefeatPhase.Descend;
+            float facing = descending ? -1f : 1f;
+            float headAngle = 0f;
+            if (defeatPhase == DefeatPhase.Look)
+            {
+                if (defeatProgress < 0.35f)
+                    headAngle = Mathf.Lerp(0f, -0.28f, Mathf.SmoothStep(0f, 1f, defeatProgress / 0.35f));
+                else if (defeatProgress < 0.60f)
+                    headAngle = -0.28f;
+                else if (defeatProgress < 0.90f)
+                    headAngle = Mathf.Lerp(-0.28f, 0.12f, Mathf.SmoothStep(0f, 1f, (defeatProgress - 0.60f) / 0.30f));
+                else
+                    headAngle = 0.12f;
+            }
+            float headCos = Mathf.Cos(headAngle);
+            float headSin = Mathf.Sin(headAngle);
             void RR(float lx, float ly, float w, float h, Color32 col)
             {
-                Vector2 P(float px, float py) => new Vector2(ox + px * c - py * s, oy + px * s + py * c);
+                Vector2 P(float px, float py)
+                {
+                    px *= facing * HeroScale; py *= HeroScale;
+                    return new Vector2(ox + px * c - py * s, oy + px * s + py * c);
+                }
                 bg.FillPolygon(new[] { P(lx, ly), P(lx + w, ly), P(lx + w, ly + h), P(lx, ly + h) }, col);
             }
-            int bend = falling ? 0 : Mathf.RoundToInt(push * 4);
+            void HR(float lx, float ly, float w, float h, Color32 col)
+            {
+                Vector2 P(float px, float py)
+                {
+                    const float pivotX = 2f;
+                    const float pivotY = -17f;
+                    float dx = px - pivotX;
+                    float dy = py - pivotY;
+                    float hx = pivotX + dx * headCos - dy * headSin;
+                    float hy = pivotY + dx * headSin + dy * headCos;
+                    hx *= facing * HeroScale;
+                    hy *= HeroScale;
+                    return new Vector2(ox + hx * c - hy * s, oy + hx * s + hy * c);
+                }
+                bg.FillPolygon(new[] { P(lx, ly), P(lx + w, ly), P(lx + w, ly + h), P(lx, ly + h) }, col);
+            }
+            int bend = cinematic ? 0 : Mathf.RoundToInt(push * 4);
             float strideAmp = 2 * (1 - 0.6f * rain);
-            int stride = falling ? 3 : Mathf.RoundToInt(Mathf.Sin(g.Scroll * 0.12f) * strideAmp);
+            int stride = approaching
+                ? Mathf.RoundToInt(Mathf.Sin(g.IntroT * 8f) * 2f)
+                : descending
+                ? Mathf.RoundToInt(Mathf.Sin(g.DefeatPhaseT * 8f) * 2f)
+                : cinematic ? (grounded ? 2 : 0) : Mathf.RoundToInt(Mathf.Sin(g.Scroll * 0.12f) * strideAmp);
             RR(-4 + stride, -6, 2, 6, Palette.Skin); RR(1 - stride, -6, 2, 6, Palette.Skin);
             RR(-4 + bend, -16, 9, 11, Palette.Cloth);
             RR(2 + bend, -16, 3, 11, Palette.ClothSh);
             RR(-5 + bend, -8, 11, 3, Palette.Cloth);
-            RR(3 + bend, -15, 9, 2, Palette.Skin); RR(3 + bend, -11, 9, 2, Palette.Skin);
-            RR(2 + bend, -22, 5, 5, Palette.Skin);
-            RR(2 + bend, -23, 6, 2, Palette.Hair); RR(1 + bend, -21, 2, 3, Palette.Hair);
-            RR(6 + bend, -19, 3, 6, Palette.Beard); RR(5 + bend, -15, 3, 3, Palette.Beard);
-            if (!falling && push > 0.4f && rain < 0.5f) RR(9 + bend, -24, 1, 2, new Color32(255, 255, 255, 255));
+            if (!cinematic && !approaching)
+            {
+                RR(3 + bend, -15, 9, 2, Palette.Skin);
+                RR(3 + bend, -11, 9, 2, Palette.Skin);
+            }
+            else if (grounded)
+            {
+                RR(-2, -14, 9, 2, Palette.Skin);
+                RR(0, -10, 8, 2, Palette.Skin);
+            }
+            else
+            {
+                int armSwing = approaching
+                    ? Mathf.RoundToInt(Mathf.Sin(g.IntroT * 8f) * 1.5f)
+                    : descending ? Mathf.RoundToInt(Mathf.Sin(g.DefeatPhaseT * 8f) * 1.5f) : 0;
+                RR(-5 + armSwing, -15, 2, 8, Palette.Skin);
+                RR(5 - armSwing, -15, 2, 8, Palette.Skin);
+            }
+
+            HR(2 + bend, -22, 5, 5, Palette.Skin);
+            HR(2 + bend, -23, 6, 2, Palette.Hair);
+            HR(1 + bend, -21, 2, 3, Palette.Hair);
+            HR(6 + bend, -19, 3, 6, Palette.Beard);
+            HR(5 + bend, -15, 3, 3, Palette.Beard);
+            if (!cinematic && push > 0.4f && rain < 0.5f)
+                HR(9 + bend, -24, 1, 2, new Color32(255, 255, 255, 255));
+            else if (defeatPhase == DefeatPhase.Look && defeatProgress > 0.18f)
+                HR(7, -21, 1, 1, new Color32(214, 208, 191, 255));
         }
 
         // ---------- Сезонные частицы / погода / тинт ----------
@@ -466,10 +704,55 @@ namespace EndlessSisyphus
         {
             foreach (var p in g.Particles)
             {
-                if (!p.wind) bg.Line(p.x, p.y, p.x - 1, p.y + 5, new Color32(150, 180, 255, 255), 1, 0.6f);
-                else bg.Line(p.x, p.y, p.x + 14, p.y, new Color32(210, 235, 255, 255), 1, 0.3f * (p.hasLife ? p.life : 1));
+                if (!p.wind)
+                {
+                    float length = p.style == 0 ? 3f : p.style == 1 ? 5f : 8f;
+                    float slant = p.style == 0 ? 0.5f : p.style == 1 ? 1.2f : 2.3f;
+                    float alpha = p.style == 0 ? 0.34f : p.style == 1 ? 0.58f : 0.76f;
+                    bg.Line(p.x, p.y, p.x - slant, p.y + length,
+                        new Color32(150, 180, 255, 255), 1, alpha);
+                }
+                else
+                {
+                    float life = Mathf.Clamp01(p.hasLife ? p.life : 1f);
+                    if (p.style == 0)
+                        bg.Line(p.x, p.y, p.x + 18f, p.y, new Color32(210, 235, 255, 255), 1, 0.22f * life);
+                    else if (p.style == 1)
+                    {
+                        bg.Line(p.x, p.y, p.x + 10f, p.y, new Color32(220, 238, 255, 255), 1, 0.38f * life);
+                        bg.Line(p.x + 3f, p.y + 3f, p.x + 15f, p.y + 3f, new Color32(190, 218, 245, 255), 1, 0.20f * life);
+                    }
+                    else
+                    {
+                        bg.Line(p.x, p.y, p.x + 9f, p.y - 2f, new Color32(205, 230, 252, 255), 1, 0.30f * life);
+                        bg.Line(p.x + 9f, p.y - 2f, p.x + 20f, p.y + 1f, new Color32(205, 230, 252, 255), 1, 0.25f * life);
+                    }
+                }
             }
-            if (g.IRain > 0.2f) bg.FillRectBlend(0, 0, VW, VH, new Color32(20, 30, 60, 255), 0.18f * g.IRain);
+            if (g.IRain > 0.2f)
+            {
+                float rainShade = g.RainVariant == 0 ? 0.10f : g.RainVariant == 1 ? 0.17f : 0.23f;
+                bg.FillRectBlend(0, 0, VW, VH, new Color32(20, 30, 60, 255), rainShade * g.IRain);
+            }
+        }
+
+        void DrawFog()
+        {
+            if (g.FogAmount <= 0.004f) return;
+            var fog = new Color32(164, 173, 193, 255);
+            bg.FillRectBlend(0, Mathf.RoundToInt(VH * 0.08f), VW, Mathf.RoundToInt(VH * 0.80f),
+                fog, g.FogAmount * 0.34f);
+            for (int i = 0; i < 5; i++)
+            {
+                float driftX = (g.Clock * (3.2f + i * 0.45f) + i * 89f) % (VW + 120f) - 60f;
+                float y = VH * (0.24f + i * 0.105f) + Mathf.Sin(g.Clock * 0.22f + i) * 5f;
+                float radiusX = 72f + i * 16f;
+                float radiusY = 10f + i * 2f;
+                bg.FillEllipse(driftX, y, radiusX, radiusY, fog,
+                    g.FogAmount * (0.22f - i * 0.018f));
+                bg.FillEllipse(driftX + VW * 0.58f, y + 5f, radiusX * 0.82f, radiusY * 0.85f,
+                    fog, g.FogAmount * (0.17f - i * 0.014f));
+            }
         }
 
         void DrawSeasonTint()

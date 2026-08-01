@@ -13,6 +13,9 @@ namespace EndlessSisyphus
         public const float TapImpulse = 2.2f;
         public const float HoldPush = 4.0f;
         public const float ShiftBoost = 1.7f;
+        public const float SteepPushSpeedMul = 0.7f; // подъём по крутому участку медленнее на 30%
+        public const float SteepCorrectGravityMul = 0.50f; // правильная комбинация гарантированно преодолевает склон
+        public const float SteepMaxMomentum = 1.7f; // но не позволяет взбираться слишком быстро
 
         public const float Gravity = 3.4f;
         public const float Drag = 1.15f;
@@ -24,6 +27,10 @@ namespace EndlessSisyphus
         public const float DrainWind = 18f;
         public const float DrainIce = 18f;
         public const float DrainSteep = 22f;
+        public const float DrainWrongSteepCombo = 14f;
+        public const float ErrWrongSteepComboTap = 4f;
+        public const float WrongSteepComboGrace = 1.5f;
+        public const float WrongSteepComboWindow = 0.7f;
         public const float DrainRollback = 8f;
         public const float ErrWindTap = 4f;
         public const float DrainCareful = 12f;     // осторожный режим вне дождя — ошибка
@@ -31,7 +38,12 @@ namespace EndlessSisyphus
         public const float RainSlipRate = 0.55f;
         public const float RainPushMul = 0.5f;     // дождь: импульс тапа вдвое ниже
         public const float RainHoldMul = 0.5f;     // дождь: удержание вдвое слабее
+        public const float RainWarnLead = 2.0f;    // подсказка появляется ровно за две секунды
+        public const float RainExitGrace = 2.8f;   // время на выключение режима после дождя
+        public const float WindReactionGrace = 0.5f; // короткое время на реакцию до штрафа за ветер
+        public const float WindExitGrace = 0.5f; // время на возобновление толкания после порыва
         public const float SteepDrift = 1.1f;      // крутой склон: постоянное сползание
+        public const float IntroDuration = 5.5f;   // Сизиф медленно и спокойно подходит к камню
 
         public const float CalmMin = 4.5f;
         public const float CalmMax = 8.0f;
@@ -40,8 +52,12 @@ namespace EndlessSisyphus
         public const float ObstacleMax = 5.6f;
 
         public const float IceLeadDist = 0.75f;    // доля VW: как далеко впереди появляется лёд
-        public const float IceLenMin = 90f;
-        public const float IceLenMax = 160f;
+        public const float IceLenMin = 106f;       // ледяные участки увеличены примерно на 18%
+        public const float IceLenMax = 190f;
+        public const float SteepLeadDist = 0.72f;
+        public const float SteepLenMin = 154f;     // на 30% длиннее прежнего участка
+        public const float SteepLenMax = 232f;
+        public const float SteepExtraGrade = 0.48f;
 
         public const float DayLen = 90f;           // длина цикла суток (сек)
         public const float SeasonLen = 70f;        // длина одного сезона (сек)
